@@ -14,6 +14,8 @@ async function loadRoute(name) {
  }).outputText;
  let source = compile(await readFile(new URL(`src/app/api/course-uuid/${name}/route.ts`, root), 'utf8'));
  source = source.replaceAll('"next/server"', JSON.stringify(import.meta.resolve('next/server.js')))
+  .replaceAll('"@/lib/school-auth.mjs"', JSON.stringify(new URL('src/lib/school-auth.mjs', root).href))
+  .replaceAll('"@/lib/session-store.mjs"', JSON.stringify(new URL('src/lib/session-store.mjs', root).href))
   .replaceAll('"@/lib/course-policy.mjs"', JSON.stringify(new URL('src/lib/course-policy.mjs', root).href))
   .replaceAll('"@/lib/login-policy.mjs"', JSON.stringify(new URL('src/lib/login-policy.mjs', root).href))
   .replaceAll('"@/lib/sign-policy.mjs"', JSON.stringify(new URL('src/lib/sign-policy.mjs', root).href))

@@ -1,23 +1,9 @@
 import { normalizeCourseSchedule } from "@/lib/course-policy.mjs";
-import { analyzeSchoolLogin } from "@/lib/login-policy.mjs";
-import { isSameOrigin, normalizeCourseDate } from "@/lib/sign-policy.mjs";
+import { authenticateRequest, AuthenticationError, clearSessionCookie, expiredSessionError, isSameOriginRequest, isUpstreamSessionExpired, API_UA } from "@/lib/school-auth.mjs";
+import { normalizeCourseDate } from "@/lib/sign-policy.mjs";
 import { NextRequest, NextResponse } from "next/server";
 
-const LOGIN_URL = "https://iclass.ucas.edu.cn:8181/app/user/login.action";
 const SCHEDULE_URL = "https://iclass.ucas.edu.cn:8181/app/course/get_stu_course_sched.action";
-
-const LOGIN_UA = "student_5.0.1.2_android_12_20__110000";
-const API_UA = "student_5.0.1.2_android_12_20_100000000000000_110000";
-
-type LoginResponse = {
-	STATUS?: string | number;
-	ERRCODE?: string | number;
-	ERRMSG?: string;
-	result?: {
-		id?: string | number;
-		sessionId?: string;
-	};
-};
 
 type ScheduleResponse = {
 	STATUS?: string | number;
@@ -40,8 +26,6 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MAX = toPositiveInt(process.env.RATE_LIMIT_5M_MAX, 10);
 const RATE_LIMIT_DAILY_MAX = toPositiveInt(process.env.RATE_LIMIT_DAILY_MAX, 20);
 const RATE_LIMIT_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
-const MAX_USERNAME_LENGTH = 254;
-const MAX_PASSWORD_LENGTH = 80;
 
 type RateLimitState = {
 	windowHits: number[];
@@ -90,14 +74,6 @@ function getClientIp(req: NextRequest): string {
 		return xff.split(",")[0]?.trim() || "unknown";
 	}
 	return req.headers.get("x-real-ip")?.trim() || "unknown";
-}
-
-function isSameOriginRequest(req: NextRequest): boolean {
-	const host = req.headers.get("host");
-	const trustedProto = process.env.TRUST_PROXY_HEADERS === "true" ? req.headers.get("x-forwarded-proto") : null;
-	const protocol = trustedProto === "https" ? "https:" : new URL(req.url).protocol;
-	const expectedUrl = host ? `${protocol}//${host}` : req.url;
-	return isSameOrigin(req.headers.get("origin"), process.env.PUBLIC_ORIGIN || expectedUrl);
 }
 
 function sweepRateLimitStore(now: number) {
@@ -159,34 +135,6 @@ function consumeRateLimit(ip: string, now: number): { ok: true } | { ok: false; 
 	return { ok: true };
 }
 
-function isCredentialInputInvalid(username: string, password: string): boolean {
-	if (!username || !password) {
-		return true;
-	}
-	if (username.length > MAX_USERNAME_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
-		return true;
-	}
-	if (/\s/.test(username)) {
-		return true;
-	}
-	return false;
-}
-
-function buildLoginBody(username: string, password: string): string {
-	const verificationUrlTemplate =
-		"http://iclass.ucas.edu.cn:88/ve/webservices/mobileCheck.shtml?method=mobileLogin&username=${0}&password=${1}&lx=${2}";
-
-	const body = new URLSearchParams({
-		phone: username,
-		password,
-		verificationType: "1",
-		verificationUrl: verificationUrlTemplate,
-		userLevel: "1"
-	});
-
-	return body.toString();
-}
-
 export async function POST(req: NextRequest) {
 	const startedAt = Date.now();
 	const requestId = crypto.randomUUID();
@@ -224,13 +172,7 @@ export async function POST(req: NextRequest) {
 		}
 
 		const bodyObject = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
-		const username = String(bodyObject.username ?? "").trim();
-		const password = String(bodyObject.password ?? "");
 		const dateInput = String(bodyObject.date ?? "").trim();
-
-		if (isCredentialInputInvalid(username, password)) {
-			return jsonWithHeaders({ message: "账号或密码格式错误" }, { status: 400 });
-		}
 
 		const date = normalizeCourseDate(dateInput);
 		if (!date) {
@@ -238,54 +180,7 @@ export async function POST(req: NextRequest) {
 		}
 
 		stage = "login";
-		const loginAbortController = new AbortController();
-		const loginTimeout = setTimeout(() => loginAbortController.abort(), REQUEST_TIMEOUT_MS);
-
-		let loginData: LoginResponse;
-		try {
-			const loginRes = await fetch(LOGIN_URL, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/x-www-form-urlencoded",
-					"User-Agent": LOGIN_UA
-				},
-				body: buildLoginBody(username, password),
-				cache: "no-store",
-				signal: loginAbortController.signal
-			});
-
-			if (!loginRes.ok) {
-				throw new ApiError(502, "UPSTREAM_LOGIN_HTTP", `登录接口HTTP异常: ${loginRes.status}`, "login");
-			}
-
-			try {
-				loginData = (await loginRes.json()) as LoginResponse;
-			} catch {
-				throw new ApiError(502, "UPSTREAM_LOGIN_BAD_JSON", "登录接口返回非JSON", "login");
-			}
-		} catch (error) {
-			if (error instanceof ApiError) {
-				throw error;
-			}
-			if (error instanceof Error && error.name === "AbortError") {
-				throw new ApiError(504, "UPSTREAM_LOGIN_TIMEOUT", "登录接口请求超时", "login");
-			}
-			throw new ApiError(502, "UPSTREAM_LOGIN_NETWORK", "登录接口网络异常", "login");
-		} finally {
-			clearTimeout(loginTimeout);
-		}
-
-		const loginResult = analyzeSchoolLogin(loginData);
-		if (!loginResult.ok) {
-			console.info("[course-uuid/login]", JSON.stringify({
-				requestId, code: loginResult.code, upstreamErrorCode: loginResult.upstreamErrorCode,
-			}));
-			return jsonWithHeaders({
-				message: loginResult.message, code: loginResult.code,
-				upstreamErrorCode: loginResult.upstreamErrorCode, requestId,
-			}, { status: loginResult.status ?? 502 });
-		}
-		const { sessionId, userId } = loginResult;
+		const { sessionId, userId } = await authenticateRequest(req, bodyObject);
 
 		stage = "schedule";
 		const scheduleAbortController = new AbortController();
@@ -304,6 +199,7 @@ export async function POST(req: NextRequest) {
 				signal: scheduleAbortController.signal
 			});
 
+			if (isUpstreamSessionExpired(scheduleRes.status)) throw await expiredSessionError(req);
 			if (!scheduleRes.ok) {
 				throw new ApiError(
 					502,
@@ -319,7 +215,7 @@ export async function POST(req: NextRequest) {
 				throw new ApiError(502, "UPSTREAM_SCHEDULE_BAD_JSON", "课表接口返回非JSON", "schedule");
 			}
 		} catch (error) {
-			if (error instanceof ApiError) {
+			if (error instanceof ApiError || error instanceof AuthenticationError) {
 				throw error;
 			}
 			if (error instanceof Error && error.name === "AbortError") {
@@ -329,6 +225,8 @@ export async function POST(req: NextRequest) {
 		} finally {
 			clearTimeout(scheduleTimeout);
 		}
+
+		if (isUpstreamSessionExpired(200, scheduleData)) throw await expiredSessionError(req);
 
 		if (String(scheduleData?.STATUS) !== "0") {
 			return jsonWithHeaders({ message: "课表查询失败，或当天无课程" }, { status: 502 });
@@ -346,6 +244,11 @@ export async function POST(req: NextRequest) {
 			{ status: 200 }
 		);
 	} catch (error) {
+		if (error instanceof AuthenticationError) {
+			const response = jsonWithHeaders({ message: error.message, code: error.code, upstreamErrorCode: error.upstreamErrorCode, requestId }, { status: error.status });
+			if (error.status === 401) clearSessionCookie(response, req);
+			return response;
+		}
 		const durationMs = Date.now() - startedAt;
 		const isApiError = error instanceof ApiError;
 		const logPayload = {

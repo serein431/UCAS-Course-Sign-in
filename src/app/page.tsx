@@ -14,6 +14,15 @@ type QueryResponse = {
 	courses: CourseItem[];
 };
 
+type SessionResponse = {
+	authenticated?: boolean;
+	username?: string;
+	expiresAt?: number;
+	message?: string;
+	code?: string;
+	requestId?: string;
+};
+
 type DirectSignResponse = {
 	success?: boolean;
 	message?: string;
@@ -224,6 +233,11 @@ export default function Home() {
 	const [username, setUsername] = useState("");
 	const [password, setPassword] = useState("");
 	const [showPassword, setShowPassword] = useState(false);
+	const [authState, setAuthState] = useState<"checking" | "guest" | "ready" | "error">("checking");
+	const [authenticatedAccount, setAuthenticatedAccount] = useState("");
+	const [rememberLogin, setRememberLogin] = useState(true);
+	const [logoutLoading, setLogoutLoading] = useState(false);
+	const [queryAttempted, setQueryAttempted] = useState(false);
 	const [date, setDate] = useState("");
 	const [keyword, setKeyword] = useState("");
 	const [manualIdentifier, setManualIdentifier] = useState("");
@@ -248,6 +262,10 @@ export default function Home() {
 	const [qrSource, setQrSource] = useState<QrSource | null>(null);
 	const qrSectionRef = useRef<HTMLDivElement | null>(null);
 	const qrGenerationRef = useRef(0);
+	const authAccountRef = useRef("");
+	const authEpochRef = useRef(0);
+	const authOperationRef = useRef(false);
+	const authCheckedRef = useRef(false);
 
 	const updateStatus = useCallback((kind: StatusKind, message: string) => {
 		setStatusKind(kind);
@@ -303,7 +321,7 @@ export default function Home() {
 		return () => window.clearTimeout(timer);
 	}, [getServerTimeOffset]);
 
-	const resetGeneratedSignState = () => {
+	const resetGeneratedSignState = useCallback(() => {
 		qrGenerationRef.current++;
 		setSelectedCourseKey("");
 		setSignUrl("");
@@ -313,14 +331,91 @@ export default function Home() {
 		setQrSource(null);
 		setActionStatusKind("idle");
 		setActionStatusText(ACTION_STATUS_DEFAULT_TEXT);
-	};
+	}, []);
 
-	const clearCourseResults = () => {
+	const clearCourseResults = useCallback(() => {
 		setCourses([]);
+		setQueryAttempted(false);
 		setResultDate("");
 		setDuplicateCount(0);
 		resetGeneratedSignState();
 		updateStatus("idle", "账号或日期已修改，请重新查询课程");
+	}, [resetGeneratedSignState, updateStatus]);
+
+	const requireLogin = useCallback((message: string) => {
+		authEpochRef.current++;
+		authAccountRef.current = "";
+		setAuthenticatedAccount("");
+		setAuthState("guest");
+		setPassword("");
+		setShowPassword(false);
+		clearCourseResults();
+		updateStatus("info", message);
+	}, [clearCourseResults, updateStatus]);
+
+	const checkSavedSession = useCallback(async (signal?: AbortSignal) => {
+		if (authOperationRef.current) return;
+		const epoch = authEpochRef.current;
+		try {
+			const response = await fetch(`${APP_BASE_PATH}/api/course-uuid/session`, { cache: "no-store", signal });
+			const data = await response.json() as SessionResponse;
+			if (epoch !== authEpochRef.current || authOperationRef.current) return;
+			if (!response.ok) throw new Error();
+			if (data.authenticated && data.username) {
+				if (authAccountRef.current !== data.username) {
+					authEpochRef.current++;
+					clearCourseResults();
+					updateStatus("info", "登录状态已恢复，选择日期即可查询课程");
+				}
+				authAccountRef.current = data.username;
+				setAuthenticatedAccount(data.username);
+				setUsername(data.username);
+				setPassword("");
+				setAuthState("ready");
+			} else if (authAccountRef.current || !authCheckedRef.current) {
+				requireLogin(authAccountRef.current ? "登录状态已失效，请重新登录" : "输入学校邮箱、密码和日期，登录后查询课程");
+			} else {
+				// 未登录时切换窗口，不清空正在输入的密码。
+				setAuthState("guest");
+			}
+			authCheckedRef.current = true;
+		} catch {
+			if (signal?.aborted) return;
+			if (epoch !== authEpochRef.current || authOperationRef.current) return;
+			// 网络错误不代表Cookie失效，也不清除仍可能有效的登录状态。
+			if (!authAccountRef.current) setAuthState("error");
+			updateStatus("error", "暂时无法读取登录状态，请检查网络后重试");
+		}
+	}, [clearCourseResults, requireLogin, updateStatus]);
+
+	useEffect(() => {
+		const controller = new AbortController();
+		const timer = window.setTimeout(() => { void checkSavedSession(controller.signal); }, 0);
+		const onFocus = () => { void checkSavedSession(controller.signal); };
+		window.addEventListener("focus", onFocus);
+		return () => {
+			window.clearTimeout(timer);
+			controller.abort();
+			window.removeEventListener("focus", onFocus);
+		};
+	}, [checkSavedSession]);
+
+	const onLogout = async () => {
+		setLogoutLoading(true);
+		authOperationRef.current = true;
+		authEpochRef.current++;
+		try {
+			const response = await fetch(`${APP_BASE_PATH}/api/course-uuid/session`, { method: "DELETE" });
+			if (!response.ok) throw new Error();
+			requireLogin("已退出登录，保存的登录状态已清除");
+			setUsername("");
+			setRememberLogin(true);
+		} catch {
+			updateStatus("error", "退出登录失败，请检查网络后重试");
+		} finally {
+			authOperationRef.current = false;
+			setLogoutLoading(false);
+		}
 	};
 
 	const getPayloadFromSource = useCallback((source: QrSource, deadline: number): string | null => {
@@ -494,13 +589,15 @@ export default function Home() {
 
 	const hasCourses = courses.length > 0;
 	const hasQr = Boolean(qrDataUrl);
-	const queryAttempted = statusKind !== "idle";
 	const hasKeyword = keyword.trim().length > 0;
-	const emptyHelpText = hasKeyword ? "可先清空筛选词，再查看全部课程" : "检查日期是否为上课日，并确认账号与密码正确";
+	const emptyHelpText = hasKeyword ? "可先清空筛选词，再查看全部课程" : "检查所选日期是否为上课日";
 	const isCourseSelected = (key: string): boolean => selectedCourseKey === key;
 
 	const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
+		if (authState === "checking" || authState === "error" || logoutLoading || loading) return;
+		authOperationRef.current = true;
+		const epoch = ++authEpochRef.current;
 		setLoading(true);
 		qrGenerationRef.current++;
 		setResultDate("");
@@ -513,22 +610,47 @@ export default function Home() {
 		updateStatus("loading", "正在查询课程…");
 
 		try {
+			if (!authenticatedAccount) {
+				updateStatus("loading", "正在登录学校账号…");
+				const loginResponse = await fetch(`${APP_BASE_PATH}/api/course-uuid/session`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ username: username.trim(), password, remember: rememberLogin }),
+				});
+				const loginData = await loginResponse.json() as SessionResponse;
+				setPassword("");
+				setShowPassword(false);
+				if (epoch !== authEpochRef.current) return;
+				if (!loginResponse.ok || !loginData.authenticated || !loginData.username) {
+					const detail = loginData.requestId ? `；请求编号 ${loginData.requestId.slice(0, 8)}` : "";
+					updateStatus("error", `${loginData.message ?? "登录失败，请稍后重试"}${detail}`);
+					return;
+				}
+				authAccountRef.current = loginData.username;
+				setAuthenticatedAccount(loginData.username);
+				setAuthState("ready");
+				updateStatus("loading", "登录成功，正在查询课程…");
+			}
+			setQueryAttempted(true);
 			const res = await fetch(`${APP_BASE_PATH}/api/course-uuid/query`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json"
 				},
 				body: JSON.stringify({
-					username: username.trim(),
-					password,
 					date: toYyyyMMdd(date)
 				})
 			});
 
 			const data = (await res.json()) as QueryResponse & { message?: string; code?: string; requestId?: string };
+			if (epoch !== authEpochRef.current) return;
 
 			if (!res.ok) {
 				setCourses([]);
+				if (res.status === 401) {
+					requireLogin(data.message ?? "登录状态已失效，请重新登录");
+					return;
+				}
 				const detail = data.requestId ? `；请求编号 ${data.requestId.slice(0, 8)}` : "";
 				updateStatus("error", `${data.message ?? "查询失败，请重试"}${detail}`);
 				return;
@@ -543,6 +665,7 @@ export default function Home() {
 			setCourses([]);
 			updateStatus("error", "网络异常，请稍后重试");
 		} finally {
+			authOperationRef.current = false;
 			setLoading(false);
 		}
 	};
@@ -686,14 +809,13 @@ export default function Home() {
 					"Content-Type": "application/json"
 				},
 				body: JSON.stringify({
-					username: username.trim(),
-					password,
 					date: toYyyyMMdd(date)
 				})
 			});
 
 			const data = (await res.json()) as QueryResponse & { message?: string; code?: string; requestId?: string };
 			if (!res.ok) {
+				if (res.status === 401) requireLogin(data.message ?? "登录状态已失效，请重新登录");
 				return { ok: false };
 			}
 
@@ -723,17 +845,17 @@ export default function Home() {
 			return;
 		}
 
-		const safeUsername = username.trim();
-		if (!safeUsername || !password) {
-			updateActionStatus("error", "请先输入账号和密码");
+		if (authState !== "ready" || !authenticatedAccount) {
+			requireLogin("请先登录学校账号");
 			return;
 		}
 
 		setDirectSignLoading(true);
+		authOperationRef.current = true;
 		updateActionStatus("loading", "正在发起签到…");
 
 		try {
-			// 后端在登录完成后获取学校时间，避免使用过期二维码中的时间。
+			// 后端使用已保存的学校会话，并取学校当前时间。
 
 			const res = await fetch(`${APP_BASE_PATH}/api/course-uuid/sign`, {
 				method: "POST",
@@ -741,8 +863,6 @@ export default function Home() {
 					"Content-Type": "application/json"
 				},
 				body: JSON.stringify({
-					username: safeUsername,
-					password,
 					courseSchedId
 				})
 			});
@@ -750,6 +870,10 @@ export default function Home() {
 			const data = (await res.json()) as DirectSignResponse;
 
 			if (!res.ok || !data.success) {
+				if (res.status === 401) {
+					requireLogin(data.message ?? "登录状态已失效，请重新登录");
+					return;
+				}
 				updateActionStatus("error", data.message ?? "签到失败，请稍后重试");
 				return;
 			}
@@ -767,6 +891,7 @@ export default function Home() {
 		} catch {
 			updateActionStatus("error", "网络异常，签到请求未完成");
 		} finally {
+			authOperationRef.current = false;
 			setDirectSignLoading(false);
 		}
 	};
@@ -799,7 +924,7 @@ export default function Home() {
 		selectedCourse && (!signWindow || now < signWindow.openAt || now > signWindow.closeAt)
 	);
 
-	const directSignDisabled = loading || directSignLoading || !hasQr || !selectedCourse?.canGenerate || resultDate !== toYyyyMMdd(date) || directSignBlockedByTime;
+	const directSignDisabled = loading || directSignLoading || logoutLoading || authState !== "ready" || !hasQr || !selectedCourse?.canGenerate || resultDate !== toYyyyMMdd(date) || directSignBlockedByTime;
 
 	const directSignButtonText = directSignLoading
 		? "签到中..."
@@ -876,6 +1001,7 @@ export default function Home() {
 						<nav aria-label="功能模式" className="mode-tabs mt-4 flex flex-wrap gap-2">
 							<button
 								type="button"
+								disabled={loading || directSignLoading || logoutLoading}
 								onClick={() => {
 									resetGeneratedSignState();
 									setFeatureMode("query");
@@ -889,6 +1015,7 @@ export default function Home() {
 							</button>
 							<button
 								type="button"
+								disabled={loading || directSignLoading || logoutLoading}
 								onClick={() => {
 									resetGeneratedSignState();
 									setFeatureMode("manual");
@@ -914,45 +1041,64 @@ export default function Home() {
 								<div className="space-y-1">
 									<h2 className="font-[var(--font-serif)] text-2xl font-semibold">查询课程</h2>
 									<p className="text-xs tracking-[0.08em] uppercase text-[color:var(--green)]">
-										账号密码仅用于向学校请求登录，不写入磁盘。请优先填写学校邮箱，与课堂教学 App 使用的账号一致。
+										只保存登录会话，不保存密码。学校会话失效后再登录。请使用学校邮箱或课堂教学 App 的账号。
 									</p>
 								</div>
 
 								<div className="mt-6 space-y-4">
-									<label className="block text-sm font-semibold">
-										学校邮箱 / 账号
-										<input
-											className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
-											name="schoolAccount"
-											inputMode="email"
-											maxLength={254}
-											autoCapitalize="none"
-											value={username}
-											onChange={(e) => { setUsername(e.target.value); clearCourseResults(); }}
-											disabled={loading || directSignLoading}
-											autoComplete="username"
-											spellCheck={false}
-											required
-										/>
-									</label>
+									{authState === "checking" ? (
+										<p role="status" className="text-sm text-[color:var(--muted)]">正在恢复登录状态…</p>
+									) : authState === "error" ? (
+										<div className="space-y-3"><p className="text-sm">暂时无法检查登录状态</p><button type="button" className="action-btn action-btn--secondary min-h-11 rounded-lg px-4 py-2 text-sm" onClick={() => { setAuthState("checking"); void checkSavedSession(); }}>重新检查登录状态</button></div>
+									) : authenticatedAccount ? (
+										<div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--paper-strong)] p-4">
+											<p className="text-sm font-semibold">已保存登录状态</p>
+											<p className="mt-2 text-sm break-all">{authenticatedAccount}</p>
+											<button type="button" onClick={() => void onLogout()} disabled={loading || directSignLoading || logoutLoading} className="action-btn action-btn--secondary mt-3 min-h-11 rounded-lg px-4 py-2 text-sm">{logoutLoading ? "正在退出…" : "退出登录 / 换账号"}</button>
+										</div>
+									) : (
+										<div className="space-y-4">
+											<label className="block text-sm font-semibold">
+												学校邮箱 / 账号
+												<input
+													className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
+													name="schoolAccount"
+													inputMode="email"
+													maxLength={254}
+													autoCapitalize="none"
+													value={username}
+													onChange={(e) => { setUsername(e.target.value); clearCourseResults(); }}
+													disabled={loading || directSignLoading}
+													autoComplete="username"
+													spellCheck={false}
+													required
+												/>
+											</label>
 
-									<label className="block text-sm font-semibold">
-										密码
-										<input
-											type={showPassword ? "text" : "password"}
-											className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
-											name="password"
-											maxLength={80}
-											autoCapitalize="none"
-											spellCheck={false}
-											value={password}
-											onChange={(e) => setPassword(e.target.value)}
-											autoComplete="current-password"
-											required
-										/>
-									</label>
+											<label className="block text-sm font-semibold">
+												密码
+												<input
+													type={showPassword ? "text" : "password"}
+													className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
+													name="password"
+													maxLength={80}
+													autoCapitalize="none"
+													spellCheck={false}
+													value={password}
+													onChange={(e) => setPassword(e.target.value)}
+													disabled={loading}
+													autoComplete="current-password"
+													required
+												/>
+											</label>
 
-									<button type="button" onClick={() => setShowPassword((value) => !value)} aria-pressed={showPassword} className="password-toggle focus-ring text-sm text-[color:var(--muted)]">{showPassword ? "隐藏密码" : "显示密码"}</button>
+											<button type="button" disabled={loading} onClick={() => setShowPassword((value) => !value)} aria-pressed={showPassword} className="password-toggle focus-ring text-sm text-[color:var(--muted)]">{showPassword ? "隐藏密码" : "显示密码"}</button>
+											<label className="flex min-h-11 items-start gap-3 text-sm leading-6">
+												<input type="checkbox" className="mt-1 h-5 w-5 shrink-0" checked={rememberLogin} onChange={(event) => setRememberLogin(event.target.checked)} disabled={loading} />
+												<span>在这台设备保持登录（最多7天）<span className="block text-xs text-[color:var(--muted)]">公用设备请取消勾选，用完后退出登录。学校会话可能提前失效。</span></span>
+											</label>
+										</div>
+									)}
 
 									<label className="block text-sm font-semibold">
 										日期
@@ -962,17 +1108,17 @@ export default function Home() {
 											name="courseDate"
 											value={date}
 											onChange={(e) => { setDate(e.target.value); clearCourseResults(); }}
-											disabled={loading || directSignLoading}
+											disabled={loading || directSignLoading || logoutLoading}
 											required
 										/>
 									</label>
 
 									<button
-										disabled={loading}
+										disabled={loading || directSignLoading || logoutLoading || authState === "checking" || authState === "error"}
 										className="action-btn action-btn--primary w-full rounded-xl px-4 py-3 text-sm font-semibold"
 										type="submit"
 									>
-										{loading ? "查询中..." : "查询课程"}
+										{loading ? "正在处理…" : authenticatedAccount ? "查询课程" : "登录并查询课程"}
 									</button>
 								</div>
 
@@ -1064,7 +1210,7 @@ export default function Home() {
 														<button
 															type="button"
 															onClick={() => onPick(course)}
-															disabled={!course.canGenerate || resultDate !== toYyyyMMdd(date) || loading || directSignLoading}
+															disabled={!course.canGenerate || resultDate !== toYyyyMMdd(date) || loading || directSignLoading || logoutLoading || authState !== "ready"}
 															className="action-btn action-btn--secondary mt-3 w-full min-h-11 rounded-lg px-3.5 py-2 text-sm font-semibold"
 														>
 															{!course.canGenerate ? "课次信息不明确" : selected ? "已选中" : "生成签到码"}
@@ -1149,7 +1295,7 @@ export default function Home() {
 																	<button
 																		type="button"
 																		onClick={() => onPick(course)}
-																		disabled={!course.canGenerate || resultDate !== toYyyyMMdd(date) || loading || directSignLoading}
+																		disabled={!course.canGenerate || resultDate !== toYyyyMMdd(date) || loading || directSignLoading || logoutLoading || authState !== "ready"}
 																		className="action-btn action-btn--secondary min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold"
 																	>
 																		{!course.canGenerate ? "课次信息不明确" : selected ? "已选中" : "生成签到码"}

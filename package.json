@@ -8,7 +8,7 @@
 		"start": "next start --hostname 127.0.0.1",
 		"lint": "eslint",
 		"test:sign": "node scripts/test-sign.mjs",
-		"test": "node --test scripts/test-local.mjs scripts/test-api.mjs scripts/test-course.mjs"
+		"test": "node --test scripts/test-local.mjs scripts/test-api.mjs scripts/test-course.mjs scripts/test-session.mjs"
 	},
 	"dependencies": {
 		"next": "^16.4.0",

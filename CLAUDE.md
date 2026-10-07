@@ -13,7 +13,7 @@ npm run start    # Start production server
 npm run lint     # Run ESLint
 ```
 
-No test suite exists in this project.
+`npm test` runs local mocked tests and never accesses the school or submits real attendance.
 
 ## Architecture
 
@@ -24,9 +24,10 @@ A single-page Next.js 16 App Router app for UCAS (国科大) students to query c
 | Route | Method | Purpose |
 |---|---|---|
 | `/` | — | Client-side SPA (see `src/app/page.tsx`) |
-| `/api/course-uuid/query` | POST | Login + fetch course schedule → filterable course list |
+| `/api/course-uuid/session` | GET / POST / DELETE | Restore / create / revoke encrypted server-side sessions with opaque HttpOnly cookies |
+| `/api/course-uuid/query` | POST | Saved school session + fetch course schedule → filterable meeting list |
 | `/api/course-uuid/timestamp` | GET | Fetch server timestamp for clock synchronization |
-| `/api/course-uuid/sign` | POST | Login + direct sign-in for a selected course |
+| `/api/course-uuid/sign` | POST | Saved school session + direct sign-in for a selected meeting |
 
 ### Key patterns
 
@@ -38,3 +39,5 @@ A single-page Next.js 16 App Router app for UCAS (国科大) students to query c
 - **Theme**: Light/dark/system with an inline `<Script>` (blocks render to prevent FOUC) and localStorage persistence under `ucas-theme-mode`.
 - **CSS**: Tailwind CSS v4 via `@tailwindcss/postcss`, with custom properties (`--font-serif`, `--green`, `--line`, `--muted`, etc.) defined in `src/app/globals.css`. BEM-style component classes (`.action-btn`, `.status-banner`, `.clay-card`, `.status-chip`) supplement utility classes.
 - **API proxy pattern**: All three route handlers mimic the official Android app's User-Agent strings and request/response shapes, acting as a thin proxy between the browser and the upstream iClass API.
+
+Session keys and encrypted records are runtime-only files outside releases. Never log credentials or cookie values, copy `.local` into builds, or test using real user passwords. Login credentials are accepted by legacy query/sign calls for CLI compatibility; the web UI sends passwords only to `/session` at explicit login.
