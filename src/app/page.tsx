@@ -1095,7 +1095,7 @@ export default function Home() {
 											<button type="button" disabled={loading} onClick={() => setShowPassword((value) => !value)} aria-pressed={showPassword} className="password-toggle focus-ring text-sm text-[color:var(--muted)]">{showPassword ? "隐藏密码" : "显示密码"}</button>
 											<label className="flex min-h-11 items-start gap-3 text-sm leading-6">
 												<input type="checkbox" className="mt-1 h-5 w-5 shrink-0" checked={rememberLogin} onChange={(event) => setRememberLogin(event.target.checked)} disabled={loading} />
-												<span>在这台设备保持登录（最多7天）<span className="block text-xs text-[color:var(--muted)]">公用设备请取消勾选，用完后退出登录。学校会话可能提前失效。</span></span>
+												<span className="min-w-0 flex-1">在这台设备保持登录（最多7天）<span className="block text-xs text-[color:var(--muted)]">公用设备请取消勾选，用完后退出登录。学校会话可能提前失效。</span></span>
 											</label>
 										</div>
 									)}

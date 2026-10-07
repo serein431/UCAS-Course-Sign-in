@@ -520,7 +520,7 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
  .mode-tabs button { min-height: 46px; font-size: 15px; }
  .panel { padding: 18px; border-width: 1px; box-shadow: 0 4px 16px var(--shadow-soft); }
  .panel h2 { font-size: 22px; }
- .panel input { min-width: 0; width: 100%; min-height: 48px; font-size: 16px; }
+ .panel input:not([type="checkbox"]):not([type="radio"]) { min-width: 0; width: 100%; min-height: 48px; font-size: 16px; }
  .panel p.tracking-\[0\.08em\] { font-size: 12px; line-height: 1.7; letter-spacing: 0; text-transform: none; }
  .panel label { font-size: 14px; }
  .action-btn { min-height: 46px; font-size: 14px; }
