@@ -504,3 +504,31 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 		animation: none;
 	}
 }
+
+/* 手机布局：输入字号避免 iOS 自动放大，按钮保留足够的触摸面积。 */
+.app-shell { min-height: 100dvh; }
+.password-toggle { min-height: 44px; text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 639px) {
+ .app-shell { padding: max(20px, env(safe-area-inset-top)) 16px max(28px, env(safe-area-inset-bottom)); }
+ .app-header { margin-bottom: 20px; }
+ .app-header h1 { font-size: 28px; line-height: 1.3; letter-spacing: -0.03em; }
+ .app-header > div:first-of-type { margin-top: 0; }
+ .app-description { margin-top: 8px; line-height: 1.65; color: var(--muted); }
+ .utility-toolbar { margin-top: 12px; gap: 8px; }
+ .repo-link-main, .theme-toggle-compact { min-height: 44px; }
+ .mode-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+ .mode-tabs button { min-height: 46px; font-size: 15px; }
+ .panel { padding: 18px; border-width: 1px; box-shadow: 0 4px 16px var(--shadow-soft); }
+ .panel h2 { font-size: 22px; }
+ .panel input { min-width: 0; width: 100%; min-height: 48px; font-size: 16px; }
+ .panel p.tracking-\[0\.08em\] { font-size: 12px; line-height: 1.7; letter-spacing: 0; text-transform: none; }
+ .panel label { font-size: 14px; }
+ .action-btn { min-height: 46px; font-size: 14px; }
+ .status-banner { overflow-wrap: anywhere; line-height: 1.75; }
+ .render-skip { content-visibility: visible; contain-intrinsic-size: none; }
+ .qr-image { width: min(260px, 100%); margin-inline: auto; background: #fff; }
+ .sign-url { max-height: 76px; overflow-y: auto; padding: 8px 10px; border-radius: 8px; background: var(--paper-strong); }
+ .qr-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+ .qr-actions .action-btn--primary { grid-column: 1 / -1; }
+ [id="main-content"] { gap: 18px; }
+}

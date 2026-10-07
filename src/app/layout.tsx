@@ -22,12 +22,13 @@ const ibmPlexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-	title: "UCAS Course Sign in",
-	description: "输入学号与密码，查询课程并生成实时刷新签到码（每5秒刷新，下载码10秒有效）",
+	title: "国科大课程签到",
+	robots: { index: false, follow: false },
+	description: "输入学号与密码，查询课程并生成实时刷新签到码（每5秒刷新，下载后请立即扫码）",
 	icons: {
-		icon: "/ucas.svg",
-		shortcut: "/ucas.svg",
-		apple: "/ucas.svg",
+		icon: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/ucas.svg`,
+		shortcut: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/ucas.svg`,
+		apple: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/ucas.svg`,
 	},
 };
 

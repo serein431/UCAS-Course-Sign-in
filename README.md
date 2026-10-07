@@ -1,3 +1,36 @@
+# 手机访问与登录排查
+
+本项目是 [lccipher/UCAS-Course-Sign-in](https://github.com/lccipher/UCAS-Course-Sign-in) 的修改版，保留原 AGPL-3.0 许可证。
+
+- 修改版源码：[serein431/UCAS-Course-Sign-in](https://github.com/serein431/UCAS-Course-Sign-in)。
+- 手机访问：https://app.corvusapi.org/ucas。
+- 已调整手机输入字号、按钮、课程卡片和二维码布局。显示密码按钮仅临时切换显示，不会存储密码。
+- 学校登录错误会提供原因类别、学校错误码与请求编号。不要把密码发给维护者。
+- `UPSTREAM_LOGIN_USER_NOT_FOUND`：学校未找到该账号。
+- `UPSTREAM_LOGIN_PASSWORD_REJECTED`：学校提示密码错误。
+- `UPSTREAM_LOGIN_ACCOUNT_RESTRICTED`：学校提示账号受限，请停止重复尝试。
+- `UPSTREAM_LOGIN_INCOMPLETE`：学校称登录成功但未提供完整会话，不能认定为密码错误。
+- `UPSTREAM_LOGIN_REJECTED`：学校拒绝登录但原因尚不能细分，请先验证同一账号能否登录官方课堂教学 App。
+- 服务不会自动尝试其他密码，也不会在登录失败后提交签到。
+
+部署方法见 [deploy/README.md](deploy/README.md)。
+
+---
+
+## 本机使用说明（本次修改）
+
+- 日常使用优先在本机运行，服务仅监听 `127.0.0.1`，不对局域网开放。
+- 启动：双击 `启动签到工具.command`；关闭终端会停止服务。首次运行需安装依赖并构建。
+- 浏览器访问 `http://127.0.0.1:3000`。不要把学校密码发给他人，也不要写进脚本或命令行参数。
+- `npm test` 只做本地测试，不访问学校、不提交签到。
+- `npm run test:sign` 会真实登录并提交签到，必须显式传入 `--allow-real-sign`。凭据从 `UCAS_USERNAME`、`UCAS_PASSWORD` 环境变量读取。
+- 直接签到需要7位课程ID；手动二维码支持7位ID或32位UUID。
+- 时间修正默认3秒，页面、下载和后端共用同一份设置。这只是兼容原项目的默认值，未确认学校当前的时钟差。
+- 二维码下载后请立即扫码。实际有效期及是否可签到由学校系统决定。
+- 默认不信任 `X-Forwarded-For`。只有在可信代理会清除并重写该请求头时，才设置 `TRUST_PROXY_HEADERS=true`。内存请求限制不适合多实例公开服务。
+
+---
+
 # UCAS Course Sign in
 
 UCAS 课程查询与签到二维码生成工具。
@@ -87,7 +120,7 @@ Browser
 
 - 上游 `sessionId` 只在服务端请求链路中短暂使用，不回传前端。
 - 前端二维码和下载二维码都由本地生成，不依赖额外前端存储。
-- 直接签到时，服务端会先登录，再调用上游签到接口。
+- 直接签到时，服务端会先登录，再获取学校当前时间并调用签到接口，不使用浏览器传入的时间戳。
 
 ## 项目结构
 
@@ -180,7 +213,7 @@ Browser
 {
 	"username": "2025xxxxxxxxxx",
 	"password": "your-password",
-	"timeTableId": "CADD27F17ACC44EDAFxxxxxxxxxxxxxx"
+	"courseSchedId": "1234567"
 }
 ```
 
@@ -188,7 +221,7 @@ Browser
 
 - `username`：学号，必填
 - `password`：密码，必填
-- `timeTableId`：课程 UUID，必填，必须是 32 位十六进制字符串
+- `courseSchedId`：课程 ID，必填，必须是 7 位数字字符串。UUID 仅用于手动生成二维码，不支持直接签到。
 
 成功响应示例：
 
@@ -253,7 +286,7 @@ Browser
 
 ### 前端
 
-- Next.js 16.2.1（App Router）
+- Next.js 16.4.0（App Router）
 - React 19.2.4
 - TypeScript 5
 - Tailwind CSS 4

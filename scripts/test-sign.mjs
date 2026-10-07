@@ -1,74 +1,40 @@
 #!/usr/bin/env node
 
-/**
- * UCAS 签到功能端到端测试脚本
- * ================================
- * 用法：
- *   node scripts/test-sign.mjs <学号> <密码> [课程ID] [--base-url http://localhost:3000]
- *
- * 示例：
- *   node scripts/test-sign.mjs 202511112222333 mypassword 1111111
- *   node scripts/test-sign.mjs 202511112222333 mypassword 1111111 --base-url https://my-site.vercel.app
- *
- * 测试内容：
- *   1. 时间戳校准 — 验证 UCAS 时间戳 API 可达且返回合法值
- *   2. 直接签到   — 绕过本地 API，直连 UCAS 签到接口
- *   3. API 签到    — 通过 /api/course-uuid/sign 完整链路签到
- *
- * 判断标准：
- *   - ERRCODE=101 / "未在上课时间" → ✅ 时间戳有效，签到功能正常
- *   - ERRCODE=100 / "参数错误"     → ❌ 时间戳被拒绝，签到功能异常
- * 
- *  # 本地测试（需要先启动 dev server）
-    npm run dev &
-    npm run test:sign <学号> <密码> [课程ID]
-
-    # 示例
-    npm run test:sign 202511112222333 mypassword 1111111
-
-    # 测试生产环境
-    node scripts/test-sign.mjs 202511112222333 mypassword 1111111 --base-url https://你的域名
-
-    # 查看帮助
-    node scripts/test-sign.mjs --help
- * 
- */
+/** 此脚本会登录学校系统并真实提交签到，不是模拟测试。 */
 
 // ── 配置 ────────────────────────────────────────────────────
 const UCAS_LOGIN_URL = "https://iclass.ucas.edu.cn:8181/app/user/login.action";
 const UCAS_SIGN_URL = "https://iclass.ucas.edu.cn:8181/app/course/stu_scan_sign.action";
 const UCAS_LOGIN_UA = "student_5.0.1.2_android_12_20__110000";
 const UCAS_API_UA = "student_5.0.1.2_android_12_20_100000000000000_110000";
-const SIGN_TIMESTAMP_BUFFER_MS = 5000; // 与 page.tsx 中 SIGN_TIMESTAMP_BUFFER_MS 保持一致
+import { SIGN_TIMESTAMP_BUFFER_MS, correctedSignTimestamp } from "../src/lib/sign-policy.mjs";
 const REQUEST_TIMEOUT_MS = 15000;
 
 // ── 参数解析 ────────────────────────────────────────────────
 const args = process.argv.slice(2);
-if (args.length < 2 || args.includes("--help") || args.includes("-h")) {
+if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     console.log(`
-用法: node scripts/test-sign.mjs <学号> <密码> [课程ID] [选项]
-
-参数:
-  学号        UCAS 学号
-  密码        UCAS 密码
-  课程ID      7位课程ID（默认: 1111111）
-
-选项:
-  --base-url  API 基地址（默认: http://localhost:3000）
-  --help      显示帮助
-
-示例:
-  node scripts/test-sign.mjs 202511112222333 mypass 1111111
-  node scripts/test-sign.mjs 202511112222333 mypass 1111111 --base-url https://my.vercel.app
+用法: UCAS_USERNAME=学号 UCAS_PASSWORD=密码 node scripts/test-sign.mjs 课程ID --allow-real-sign
+凭据仅从环境变量读取。此命令会真实提交签到，请勿用于普通测试。
+可选: --base-url http://127.0.0.1:3000
+安全的本地测试: npm test
 `);
     process.exit(0);
 }
 
-const username = args[0];
-const password = args[1];
-const courseSchedId = /^\d{7}$/.test(args[2] ?? "") ? args[2] : "1111111";
+if (!args.includes("--allow-real-sign")) {
+    console.error("此脚本会真实提交签到。确认后添加 --allow-real-sign；普通本地测试请运行 npm test。");
+    process.exit(1);
+}
+const username = process.env.UCAS_USERNAME;
+const password = process.env.UCAS_PASSWORD;
+const courseSchedId = args.find((arg) => /^\d{7}$/.test(arg));
+if (!username || !password || !courseSchedId) {
+    console.error("请通过 UCAS_USERNAME、UCAS_PASSWORD 环境变量提供凭据，并明确指定7位课程ID。不要把密码写在命令行里。");
+    process.exit(1);
+}
 const baseUrlFlagIdx = args.indexOf("--base-url");
-const baseUrl = baseUrlFlagIdx >= 0 ? args[baseUrlFlagIdx + 1]?.replace(/\/+$/, "") || "http://localhost:3000" : "http://localhost:3000";
+const baseUrl = baseUrlFlagIdx >= 0 ? args[baseUrlFlagIdx + 1]?.replace(/\/+$/, "") || "http://127.0.0.1:3000" : "http://127.0.0.1:3000";
 
 // ── 工具函数 ────────────────────────────────────────────────
 const RED = "\x1b[31m";
@@ -159,7 +125,8 @@ async function main() {
     }
 
     // 计算校准后的签到时间戳
-    const signTimestamp = serverTimestamp > 0 ? serverTimestamp - SIGN_TIMESTAMP_BUFFER_MS : 0;
+    if (!Number.isSafeInteger(serverTimestamp) || serverTimestamp < 1e12) throw new Error("时间校准失败，停止真实签到测试");
+    const signTimestamp = correctedSignTimestamp(serverTimestamp);
     info(`校准签到时间戳: ${signTimestamp} (serverTime - ${SIGN_TIMESTAMP_BUFFER_MS}ms)`);
 
     // ─── 测试 2：登录 UCAS ────────────────────────────────────
@@ -193,7 +160,10 @@ async function main() {
 
     let directResult = null;
     try {
-        const signUrl = `${UCAS_SIGN_URL}?courseSchedId=${courseSchedId}&timestamp=${signTimestamp}&id=${userId}`;
+        if (!sessionId || !userId) throw new Error("登录失败，停止提交签到");
+        const freshTimeResponse = await fetchWithTimeout(`${baseUrl}/api/course-uuid/timestamp`);
+        const freshTime = await freshTimeResponse.json();
+        const signUrl = `${UCAS_SIGN_URL}?courseSchedId=${courseSchedId}&timestamp=${correctedSignTimestamp(freshTime.timestamp)}&id=${userId}`;
         const signRes = await fetchWithTimeout(signUrl, {
             headers: {
                 sessionId,
@@ -206,7 +176,7 @@ async function main() {
         const errmsg = directResult?.ERRMSG ?? "";
         const status = directResult?.STATUS ?? "";
 
-        check("收到 UCAS 响应", !!directResult);
+        check("签到结果已完成", status === "0" && directResult?.result?.stuSignStatus === "1");
         check(
             "ERRCODE ≠ 100（时间戳未被拒绝）",
             errcode !== "100",
@@ -240,13 +210,12 @@ async function main() {
                 username,
                 password,
                 courseSchedId,
-                timestamp: signTimestamp,
             }),
         });
 
         const apiData = await apiRes.json();
 
-        check("API 返回响应", !!apiData);
+        check("API 确认签到成功", apiRes.ok && apiData.success === true && apiData?.result?.stuSignStatus === "1");
         check(
             "message 不含「参数错误」",
             !(apiData?.message ?? "").includes("参数错误"),
@@ -254,7 +223,7 @@ async function main() {
         );
         check(
             "upstreamStatus 不是 ERRCODE=100",
-            apiData?.upstreamStatus !== "100",
+            apiData?.success === true,
             `upstreamStatus=${apiData?.upstreamStatus}`
         );
 
@@ -286,7 +255,7 @@ async function main() {
         }
     } else {
         console.log(`${GREEN}签到功能正常 ✓${RESET}`);
-        console.log(`  (如返回「未在上课时间」而非「参数错误」，即表示时间戳有效)`);
+        console.log("  仅表示本次测试结果，不保证下一次签到成功。");
     }
     console.log("");
 

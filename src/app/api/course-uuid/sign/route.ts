@@ -1,3 +1,6 @@
+import { analyzeSchoolLogin } from "@/lib/login-policy.mjs";
+import { fetchSchoolTimestamp } from "@/lib/server-time";
+import { isSameOrigin, normalizeCourseSchedId, correctedSignTimestamp } from "@/lib/sign-policy.mjs";
 import { NextRequest, NextResponse } from "next/server";
 
 const LOGIN_URL = "https://iclass.ucas.edu.cn:8181/app/user/login.action";
@@ -29,9 +32,11 @@ type RateLimitState = {
 };
 
 type LoginResponse = {
-	STATUS?: string;
+	STATUS?: string | number;
+	ERRCODE?: string | number;
+	ERRMSG?: string;
 	result?: {
-		id?: string;
+		id?: string | number;
 		sessionId?: string;
 	};
 };
@@ -87,6 +92,7 @@ function toPositiveInt(value: string | undefined, fallback: number): number {
 }
 
 function getClientIp(req: NextRequest): string {
+	if (process.env.TRUST_PROXY_HEADERS !== "true") return "local";
 	const xff = req.headers.get("x-forwarded-for");
 	if (xff) {
 		return xff.split(",")[0]?.trim() || "unknown";
@@ -95,22 +101,11 @@ function getClientIp(req: NextRequest): string {
 }
 
 function isSameOriginRequest(req: NextRequest): boolean {
-	const origin = req.headers.get("origin");
-	if (!origin) {
-		return true;
-	}
-
 	const host = req.headers.get("host");
-	if (!host) {
-		return false;
-	}
-
-	try {
-		const originHost = new URL(origin).host;
-		return originHost === host;
-	} catch {
-		return false;
-	}
+	const trustedProto = process.env.TRUST_PROXY_HEADERS === "true" ? req.headers.get("x-forwarded-proto") : null;
+	const protocol = trustedProto === "https" ? "https:" : new URL(req.url).protocol;
+	const expectedUrl = host ? `${protocol}//${host}` : req.url;
+	return isSameOrigin(req.headers.get("origin"), process.env.PUBLIC_ORIGIN || expectedUrl);
 }
 
 function sweepRateLimitStore(now: number) {
@@ -185,13 +180,7 @@ function isCredentialInputInvalid(username: string, password: string): boolean {
 	return false;
 }
 
-function normalizeCourseSchedId(raw: string): string | null {
-	const compact = raw.trim();
-	if (!/^\d{7}$/.test(compact)) {
-		return null;
-	}
-	return compact;
-}
+
 
 function buildLoginBody(username: string, password: string): string {
 	const verificationUrlTemplate =
@@ -249,10 +238,6 @@ export async function POST(req: NextRequest) {
 		const password = String(bodyObject.password ?? "");
 		const courseSchedIdRaw = String(bodyObject.courseSchedId ?? bodyObject.timeTableId ?? "");
 		const courseSchedId = normalizeCourseSchedId(courseSchedIdRaw);
-		const clientTimestamp =
-			typeof bodyObject.timestamp === "number" && Number.isFinite(bodyObject.timestamp)
-				? bodyObject.timestamp
-				: Date.now();
 
 		if (isCredentialInputInvalid(username, password)) {
 			return jsonWithHeaders({ message: "学号或密码格式错误" }, { status: 400 });
@@ -300,12 +285,17 @@ export async function POST(req: NextRequest) {
 			clearTimeout(loginTimeout);
 		}
 
-		const sessionId = loginData?.result?.sessionId;
-		const userId = loginData?.result?.id;
-
-		if (loginData?.STATUS !== "0" || !sessionId || !userId) {
-			return jsonWithHeaders({ message: "登录失败，请检查学号密码是否正确" }, { status: 401 });
+		const loginResult = analyzeSchoolLogin(loginData);
+		if (!loginResult.ok) {
+			console.info("[course-uuid/login]", JSON.stringify({
+				requestId, code: loginResult.code, upstreamErrorCode: loginResult.upstreamErrorCode,
+			}));
+			return jsonWithHeaders({
+				message: loginResult.message, code: loginResult.code,
+				upstreamErrorCode: loginResult.upstreamErrorCode, requestId,
+			}, { status: loginResult.status ?? 502 });
 		}
+		const { sessionId, userId } = loginResult;
 
 		stage = "sign";
 		const signAbortController = new AbortController();
@@ -313,6 +303,7 @@ export async function POST(req: NextRequest) {
 
 		let signData: UpstreamSignResponse;
 		try {
+			const clientTimestamp = correctedSignTimestamp(await fetchSchoolTimestamp());
 			const upstreamUrl = `${SIGN_URL}?courseSchedId=${encodeURIComponent(courseSchedId)}&timestamp=${clientTimestamp}&id=${encodeURIComponent(userId)}`;
 
 			const signRes = await fetch(upstreamUrl, {

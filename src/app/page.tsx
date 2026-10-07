@@ -1,7 +1,8 @@
 "use client";
 
 import Image from "next/image";
-import { FormEvent, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { correctedSignTimestamp, normalizeCourseSchedId } from "@/lib/sign-policy.mjs";
+import { FormEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 
 type CourseItem = {
 	id: string;
@@ -40,13 +41,13 @@ type RepoStarsCache = {
 	updatedAt: number;
 };
 
+const APP_BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
 const REPO_STARS_CACHE_KEY = "ucas-repo-stars-cache-v1";
 const REPO_STARS_CACHE_TTL_MS = 1000 * 60 * 30;
 const AUTO_QR_TTL_MS = 5 * 1000;
-const DOWNLOAD_QR_TTL_MS = 10 * 1000;
-// UCAS 的 get_timestamp.do 与 stu_scan_sign.action 运行在不同服务器上，
-// 两者时钟偏差约 3.5s。校准对齐了 timestamp API，需要减去缓冲才能被 sign API 接受。
-const SIGN_TIMESTAMP_BUFFER_MS = 3 * 1000;
+const OFFSET_TTL_MS = 30 * 1000;
+// 时间修正由共用函数负责，默认值未经过当前学校系统实测。
 
 const ACTION_STATUS_DEFAULT_TEXT = "生成签到码后，可在此查看下载、复制和点击签到的状态信息";
 const SIGN_BASE_URL = "https://iclass.ucas.edu.cn:8181/app/course/stu_scan_sign.action";
@@ -123,7 +124,7 @@ function buildManualSignInUrl(identifier: string, expiresAt: number): string | n
 		return null;
 	}
 
-	if (/^\d+$/.test(raw)) {
+	if (normalizeCourseSchedId(raw)) {
 		return `${SIGN_BASE_URL}?courseSchedId=${encodeURIComponent(raw)}&timestamp=${expiresAt}`;
 	}
 
@@ -217,7 +218,7 @@ function writeRepoStarsCache(stars: number, repoUpdatedAt: string): void {
 }
 
 export default function Home() {
-	const repoUrl = "https://github.com/lccipher/UCAS-Course-Sign-in";
+	const repoUrl = "https://github.com/serein431/UCAS-Course-Sign-in";
 	const [themeMode, setThemeMode] = useState<ThemeMode>(getSavedThemeMode);
 	const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
 	const [repoStars, setRepoStars] = useState<number | null>(null);
@@ -225,7 +226,8 @@ export default function Home() {
 	const [featureMode, setFeatureMode] = useState<FeatureMode>("query");
 	const [username, setUsername] = useState("");
 	const [password, setPassword] = useState("");
-	const [date, setDate] = useState(getTodayInputDate);
+	const [showPassword, setShowPassword] = useState(false);
+	const [date, setDate] = useState("");
 	const [keyword, setKeyword] = useState("");
 	const [manualIdentifier, setManualIdentifier] = useState("");
 	const [courses, setCourses] = useState<CourseItem[]>([]);
@@ -236,29 +238,30 @@ export default function Home() {
 	const [actionStatusKind, setActionStatusKind] = useState<StatusKind>("idle");
 	const [loading, setLoading] = useState(false);
 	const [manualLoading, setManualLoading] = useState(false);
+	const [timeWarning, setTimeWarning] = useState("");
 	const [directSignLoading, setDirectSignLoading] = useState(false);
 	const [signUrl, setSignUrl] = useState("");
 	const [qrDataUrl, setQrDataUrl] = useState("");
 	const [expireAt, setExpireAt] = useState(0);
-	const [expireCountdown, setExpireCountdown] = useState(0);
+	const [now, setNow] = useState(0);
+	const expireCountdown = expireAt ? Math.max(0, Math.ceil((expireAt - now) / 1000)) : 0;
 	const [qrRelayActive, setQrRelayActive] = useState(false);
 	const [qrSource, setQrSource] = useState<QrSource | null>(null);
 	const qrSectionRef = useRef<HTMLDivElement | null>(null);
 
-	const updateStatus = (kind: StatusKind, message: string) => {
+	const updateStatus = useCallback((kind: StatusKind, message: string) => {
 		setStatusKind(kind);
 		setStatusText(message);
-	};
+	}, []);
 
-	const updateActionStatus = (kind: StatusKind, message: string) => {
+	const updateActionStatus = useCallback((kind: StatusKind, message: string) => {
 		setActionStatusKind(kind);
 		setActionStatusText(message);
-	};
+	}, []);
 
 	const timeOffsetRef = useRef<{ offset: number; fetchedAt: number } | null>(null);
-	const OFFSET_TTL_MS = 30 * 1000;
 
-	const getServerTimeOffset = async (): Promise<number> => {
+	const getServerTimeOffset = useCallback(async (): Promise<number> => {
 		const cached = timeOffsetRef.current;
 		if (cached && Date.now() - cached.fetchedAt < OFFSET_TTL_MS) {
 			return cached.offset;
@@ -266,7 +269,7 @@ export default function Home() {
 
 		try {
 			const start = Date.now();
-			const res = await fetch("/api/course-uuid/timestamp", {
+			const res = await fetch(`${APP_BASE_PATH}/api/course-uuid/timestamp`, {
 				cache: "no-store"
 			});
 			if (!res.ok) {
@@ -278,59 +281,65 @@ export default function Home() {
 				const serverTime = data.timestamp + Math.floor(latency / 2);
 				const offset = serverTime - Date.now();
 				timeOffsetRef.current = { offset, fetchedAt: Date.now() };
+				setTimeWarning("");
 				return offset;
 			}
 		} catch {}
 
-		// 校准失败：优先用过期的缓存降级
-		if (cached) return cached.offset;
-		timeOffsetRef.current = { offset: 0, fetchedAt: Date.now() };
+		// 校准失败：最多使用5分钟内的缓存
+		if (cached && Date.now() - cached.fetchedAt >= 5 * 60 * 1000) {
+			timeOffsetRef.current = null;
+		}
+		if (cached && Date.now() - cached.fetchedAt < 5 * 60 * 1000) {
+			setTimeWarning("学校时间校准暂时失败，正在使用上次校准结果；二维码可能失效");
+			return cached.offset;
+		}
+		setTimeWarning("无法校准学校时间，二维码暂用本机时间，可能无法签到；请稍后重试");
 		return 0;
-	};
+	}, []);
 
 	useEffect(() => {
-		void getServerTimeOffset();
-	}, []);
+		const timer = window.setTimeout(() => { void getServerTimeOffset(); }, 0);
+		return () => window.clearTimeout(timer);
+	}, [getServerTimeOffset]);
 
 	const resetGeneratedSignState = () => {
 		setSelectedUuid("");
 		setSignUrl("");
 		setQrDataUrl("");
 		setExpireAt(0);
-		setExpireCountdown(0);
 		setQrRelayActive(false);
 		setQrSource(null);
 		setActionStatusKind("idle");
 		setActionStatusText(ACTION_STATUS_DEFAULT_TEXT);
 	};
 
-	const getPayloadFromSource = (source: QrSource, deadline: number): string | null => {
+	const getPayloadFromSource = useCallback((source: QrSource, deadline: number): string | null => {
 		if (source.mode === "query") {
 			return buildSignInUrl(source.courseId, deadline);
 		}
 		return buildManualSignInUrl(source.identifier, deadline);
-	};
+	}, []);
 
-	const generateQrDataUrlFromPayload = async (payload: string): Promise<string> => {
+	const generateQrDataUrlFromPayload = useCallback(async (payload: string): Promise<string> => {
 		const { default: QRCode } = await import("qrcode");
 		return QRCode.toDataURL(payload, {
 			width: 320,
 			margin: 1,
 			errorCorrectionLevel: "M"
 		});
-	};
+	}, []);
 
-	const regenerateAutoQr = async (source: QrSource): Promise<boolean> => {
+	const regenerateAutoQr = useCallback(async (source: QrSource): Promise<boolean> => {
 		const offset = await getServerTimeOffset();
 		const currentTimestamp = Date.now() + offset;
 		// 签到时间戳减去缓冲，弥补 UCAS 两台服务器间的时钟偏差
-		const signTimestamp = currentTimestamp - SIGN_TIMESTAMP_BUFFER_MS;
+		const signTimestamp = correctedSignTimestamp(Math.round(currentTimestamp));
 		const payload = getPayloadFromSource(source, signTimestamp);
 		if (!payload) {
 			setQrDataUrl("");
 			setSignUrl("");
 			setExpireAt(0);
-			setExpireCountdown(0);
 			return false;
 		}
 
@@ -344,10 +353,9 @@ export default function Home() {
 			setQrDataUrl("");
 			setSignUrl("");
 			setExpireAt(0);
-			setExpireCountdown(0);
 			return false;
 		}
-	};
+	}, [getServerTimeOffset, getPayloadFromSource, generateQrDataUrlFromPayload]);
 
 	const getStatusBannerClassName = (kind: StatusKind): string => {
 		if (kind === "error") {
@@ -391,21 +399,18 @@ export default function Home() {
 
 	useEffect(() => {
 		const controller = new AbortController();
-		const cached = readRepoStarsCache();
-
-		if (cached) {
-			setRepoStars(cached.stars);
-			setRepoUpdatedAt(cached.repoUpdatedAt);
-			if (Date.now() - cached.updatedAt < REPO_STARS_CACHE_TTL_MS) {
-				return () => {
-					controller.abort();
-				};
-			}
-		}
-
 		const loadRepoStars = async () => {
+			await Promise.resolve();
+			if (controller.signal.aborted) return;
+			const cached = readRepoStarsCache();
+			if (cached) {
+				setRepoStars(cached.stars);
+				setRepoUpdatedAt(cached.repoUpdatedAt);
+				if (Date.now() - cached.updatedAt < REPO_STARS_CACHE_TTL_MS) return;
+			}
+
 			try {
-				const res = await fetch("https://api.github.com/repos/lccipher/UCAS-Course-Sign-in", {
+				const res = await fetch("https://api.github.com/repos/serein431/UCAS-Course-Sign-in", {
 					signal: controller.signal,
 					headers: {
 						Accept: "application/vnd.github+json"
@@ -433,23 +438,12 @@ export default function Home() {
 	}, []);
 
 	useEffect(() => {
-		if (!expireAt) {
-			setExpireCountdown(0);
-			return;
-		}
-
-		const updateCountdown = () => {
-			const remainMs = expireAt - (Date.now() + (timeOffsetRef.current?.offset ?? 0));
-			setExpireCountdown(Math.max(0, Math.ceil(remainMs / 1000)));
-		};
-
-		updateCountdown();
-		const timer = window.setInterval(updateCountdown, 250);
-
-		return () => {
-			window.clearInterval(timer);
-		};
-	}, [expireAt]);
+		const timer = window.setInterval(() => {
+			setNow(Date.now() + (timeOffsetRef.current?.offset ?? 0));
+			setDate((current) => current || getTodayInputDate());
+		}, 250);
+		return () => window.clearInterval(timer);
+	}, []);
 
 	useEffect(() => {
 		if (!qrSource || !expireAt) {
@@ -471,7 +465,7 @@ export default function Home() {
 		return () => {
 			window.clearTimeout(timer);
 		};
-	}, [qrSource, expireAt]);
+	}, [qrSource, expireAt, regenerateAutoQr, updateActionStatus, updateStatus]);
 
 	const deferredKeyword = useDeferredValue(keyword);
 
@@ -499,12 +493,11 @@ export default function Home() {
 		setSignUrl("");
 		setQrDataUrl("");
 		setExpireAt(0);
-		setExpireCountdown(0);
 		setQrSource(null);
 		updateStatus("loading", "正在查询课程…");
 
 		try {
-			const res = await fetch("/api/course-uuid/query", {
+			const res = await fetch(`${APP_BASE_PATH}/api/course-uuid/query`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json"
@@ -516,11 +509,12 @@ export default function Home() {
 				})
 			});
 
-			const data = (await res.json()) as QueryResponse & { message?: string };
+			const data = (await res.json()) as QueryResponse & { message?: string; code?: string; requestId?: string };
 
 			if (!res.ok) {
 				setCourses([]);
-				updateStatus("error", data.message ?? "查询失败，请重试");
+				const detail = data.requestId ? `；请求编号 ${data.requestId.slice(0, 8)}` : "";
+				updateStatus("error", `${data.message ?? "查询失败，请重试"}${detail}`);
 				return;
 			}
 
@@ -563,7 +557,7 @@ export default function Home() {
 		const payload = getPayloadFromSource(source, Date.now() + (timeOffsetRef.current?.offset ?? 0));
 
 		if (!payload) {
-			updateStatus("error", "请输入纯数字课程ID或32位UUID");
+			updateStatus("error", "请输入7位数字课程ID或32位UUID");
 			return;
 		}
 
@@ -600,7 +594,7 @@ export default function Home() {
 		}
 
 		const offset = await getServerTimeOffset();
-		const deadline = Date.now() + offset + DOWNLOAD_QR_TTL_MS;
+		const deadline = correctedSignTimestamp(Math.round(Date.now() + offset));
 		const payload = getPayloadFromSource(qrSource, deadline);
 		if (!payload) {
 			if (featureMode === "query") {
@@ -619,10 +613,10 @@ export default function Home() {
 			link.download = `ucas-signin-${safeIdentifier}-${deadline}.png`;
 			link.click();
 			if (featureMode === "query") {
-				updateActionStatus("success", "二维码已开始下载（10秒有效）");
+				updateActionStatus("success", "二维码已开始下载，请立即扫码；有效期由学校决定");
 				return;
 			}
-			updateStatus("success", "二维码已开始下载（10秒有效）");
+			updateStatus("success", "二维码已开始下载，请立即扫码；有效期由学校决定");
 		} catch {
 			if (featureMode === "query") {
 				updateActionStatus("error", "下载二维码失败，请稍后重试");
@@ -655,7 +649,7 @@ export default function Home() {
 
 	const refreshCoursesAfterSign = async (): Promise<{ ok: true; total: number } | { ok: false }> => {
 		try {
-			const res = await fetch("/api/course-uuid/query", {
+			const res = await fetch(`${APP_BASE_PATH}/api/course-uuid/query`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json"
@@ -667,7 +661,7 @@ export default function Home() {
 				})
 			});
 
-			const data = (await res.json()) as QueryResponse & { message?: string };
+			const data = (await res.json()) as QueryResponse & { message?: string; code?: string; requestId?: string };
 			if (!res.ok) {
 				return { ok: false };
 			}
@@ -696,8 +690,8 @@ export default function Home() {
 				}
 			})();
 
-		if (!courseSchedId) {
-			updateActionStatus("error", "请先在查询课程模式选择课程并生成签到码");
+		if (!normalizeCourseSchedId(courseSchedId)) {
+			updateActionStatus("error", "直接签到需要7位数字课程ID，请先查询并选择课程");
 			return;
 		}
 
@@ -711,20 +705,9 @@ export default function Home() {
 		updateActionStatus("loading", "正在发起签到…");
 
 		try {
-			// 优先从当前二维码URL中提取时间戳，与扫码行为完全一致
-			let signTimestamp = 0;
-			try {
-				const url = new URL(signUrl);
-				const ts = url.searchParams.get("timestamp");
-				if (ts) signTimestamp = Number(ts);
-			} catch {}
-			// 降级：使用校准后的当前时间戳（减去缓冲）
-			if (!signTimestamp || !Number.isFinite(signTimestamp)) {
-				const offset = await getServerTimeOffset();
-				signTimestamp = Date.now() + offset - SIGN_TIMESTAMP_BUFFER_MS;
-			}
+			// 后端在登录完成后获取学校时间，避免使用过期二维码中的时间。
 
-			const res = await fetch("/api/course-uuid/sign", {
+			const res = await fetch(`${APP_BASE_PATH}/api/course-uuid/sign`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json"
@@ -732,8 +715,7 @@ export default function Home() {
 				body: JSON.stringify({
 					username: safeUsername,
 					password,
-					courseSchedId,
-					timestamp: signTimestamp
+					courseSchedId
 				})
 			});
 
@@ -765,16 +747,15 @@ export default function Home() {
 		setThemeMode(resolvedTheme === "dark" ? "light" : "dark");
 	};
 
-	const selectedCourse = useMemo(() => {
+	const selectedCourse = (() => {
 		if (!selectedUuid) {
 			return null;
 		}
 		return courses.find((item) => item.uuid === selectedUuid) ?? null;
-	}, [courses, selectedUuid]);
+	})();
 
-	const now = Date.now() + (timeOffsetRef.current?.offset ?? 0);
 
-	const signWindow = useMemo(() => {
+	const signWindow = (() => {
 		if (!selectedCourse) {
 			return null;
 		}
@@ -790,7 +771,7 @@ export default function Home() {
 			openAt: openAt.getTime(),
 			closeAt: classEnd.getTime()
 		};
-	}, [selectedCourse, date]);
+	})();
 
 	const directSignBlockedByTime = Boolean(
 		selectedCourse && (!signWindow || now < signWindow.openAt || now > signWindow.closeAt)
@@ -806,19 +787,21 @@ export default function Home() {
 
 	return (
 		<>
-			<div className="grain flex min-h-screen flex-col px-4 py-7 sm:px-10">
+			<div className="app-shell grain flex min-h-screen flex-col px-4 py-7 sm:px-10">
 				<main className="mx-auto w-full max-w-6xl">
-					<header className="mb-7">
+					<header className="app-header mb-7">
 						<a href="#main-content" className="sr-only focus:not-sr-only skip-link">
 							跳到主要内容
 						</a>
 						<div className="mt-4">
 							<h1 className="max-w-4xl font-[var(--font-serif)] text-3xl leading-tight font-semibold sm:text-5xl">
-								UCAS Course Sign in
+								<span className="hidden sm:inline">UCAS Course Sign in</span>
+								<span className="sm:hidden">国科大课程签到</span>
 							</h1>
 						</div>
-						<p className="mt-4 text-sm leading-7 sm:text-base">
-							查询课程，选择课程后可直接签到或下载签到码。也可以手动输入课程ID或UUID生成签到码。每个签到码每5秒自动刷新，下载二维码10秒有效。
+						<p className="app-description mt-4 text-sm leading-7 sm:text-base">
+							<span className="hidden sm:inline">查询课程后选择课程，可直接签到或生成二维码。二维码每5秒刷新，下载后请立即扫码。</span>
+							<span className="sm:hidden">查询当天课程，选择课程后生成签到码。</span>
 						</p>
 						<div className="utility-toolbar mt-4 flex flex-wrap items-center gap-2.5">
 							<div className="repo-link-group inline-flex min-h-11 items-stretch">
@@ -868,7 +851,7 @@ export default function Home() {
 								<span>{resolvedTheme === "dark" ? "切换亮色" : "切换暗色"}</span>
 							</button>
 						</div>
-						<div className="mt-4 flex flex-wrap gap-2">
+						<nav aria-label="功能模式" className="mode-tabs mt-4 flex flex-wrap gap-2">
 							<button
 								type="button"
 								onClick={() => {
@@ -880,7 +863,7 @@ export default function Home() {
 									featureMode === "query" ? "action-btn--primary" : "action-btn--secondary"
 								}`}
 							>
-								查询课程模式
+								查询课程
 							</button>
 							<button
 								type="button"
@@ -893,10 +876,12 @@ export default function Home() {
 									featureMode === "manual" ? "action-btn--primary" : "action-btn--secondary"
 								}`}
 							>
-								手动生成模式
+								手动生成
 							</button>
-						</div>
+						</nav>
 					</header>
+
+					{timeWarning ? <p role="status" className="status-banner status-banner--info rounded-xl px-4 py-3 text-sm">{timeWarning}</p> : null}
 
 					{featureMode === "query" ? (
 						<section
@@ -907,7 +892,7 @@ export default function Home() {
 								<div className="space-y-1">
 									<h2 className="font-[var(--font-serif)] text-2xl font-semibold">查询课程</h2>
 									<p className="text-xs tracking-[0.08em] uppercase text-[color:var(--green)]">
-										学号和密码仅用于本次查询，不会存储
+										账号密码仅用于向学校请求登录，不写入磁盘。请使用学校课堂教学 App 中的账号。
 									</p>
 								</div>
 
@@ -917,6 +902,9 @@ export default function Home() {
 										<input
 											className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
 											name="studentId"
+											inputMode="numeric"
+											maxLength={40}
+											autoCapitalize="none"
 											value={username}
 											onChange={(e) => setUsername(e.target.value)}
 											autoComplete="username"
@@ -928,15 +916,20 @@ export default function Home() {
 									<label className="block text-sm font-semibold">
 										密码
 										<input
-											type="password"
+											type={showPassword ? "text" : "password"}
 											className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
 											name="password"
+											maxLength={80}
+											autoCapitalize="none"
+											spellCheck={false}
 											value={password}
 											onChange={(e) => setPassword(e.target.value)}
 											autoComplete="current-password"
 											required
 										/>
 									</label>
+
+									<button type="button" onClick={() => setShowPassword((value) => !value)} aria-pressed={showPassword} className="password-toggle focus-ring text-sm text-[color:var(--muted)]">{showPassword ? "隐藏密码" : "显示密码"}</button>
 
 									<label className="block text-sm font-semibold">
 										日期
@@ -1144,17 +1137,17 @@ export default function Home() {
 													width={220}
 													height={220}
 													unoptimized
-													className="w-[220px] max-w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-raised)] p-2"
+													className="qr-image w-[220px] max-w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-raised)] p-2"
 												/>
 												<div className="space-y-3 text-sm numeric-tabular">
 													<p>
 														刷新倒计时：
 														<span className="font-semibold">{expireCountdown}s</span>
 													</p>
-													<p className="break-all font-mono text-xs leading-6 text-[color:var(--muted)]">
+													<p className="sign-url break-all font-mono text-xs leading-6 text-[color:var(--muted)]">
 														{signUrl}
 													</p>
-													<div className="flex flex-wrap gap-2">
+													<div className="qr-actions flex flex-wrap gap-2">
 														<button
 															type="button"
 															onClick={onDirectSign}
@@ -1260,17 +1253,17 @@ export default function Home() {
 											width={220}
 											height={220}
 											unoptimized
-											className="w-[220px] max-w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-raised)] p-2"
+											className="qr-image w-[220px] max-w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-raised)] p-2"
 										/>
 										<div className="space-y-3 text-sm numeric-tabular">
 											<p>
 												刷新倒计时：
 												<span className="font-semibold">{expireCountdown}s</span>
 											</p>
-											<p className="break-all font-mono text-xs leading-6 text-[color:var(--muted)]">
+											<p className="sign-url break-all font-mono text-xs leading-6 text-[color:var(--muted)]">
 												{signUrl}
 											</p>
-											<div className="flex flex-wrap gap-2">
+											<div className="qr-actions flex flex-wrap gap-2">
 												<button
 													type="button"
 													onClick={onDownloadQr}

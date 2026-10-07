@@ -1,3 +1,5 @@
+import { analyzeSchoolLogin } from "@/lib/login-policy.mjs";
+import { isSameOrigin, normalizeCourseDate } from "@/lib/sign-policy.mjs";
 import { NextRequest, NextResponse } from "next/server";
 
 const LOGIN_URL = "https://iclass.ucas.edu.cn:8181/app/user/login.action";
@@ -7,9 +9,11 @@ const LOGIN_UA = "student_5.0.1.2_android_12_20__110000";
 const API_UA = "student_5.0.1.2_android_12_20_100000000000000_110000";
 
 type LoginResponse = {
-	STATUS?: string;
+	STATUS?: string | number;
+	ERRCODE?: string | number;
+	ERRMSG?: string;
 	result?: {
-		id?: string;
+		id?: string | number;
 		sessionId?: string;
 	};
 };
@@ -71,13 +75,7 @@ class ApiError extends Error {
 	}
 }
 
-function normalizeDateToYyyyMMdd(input: string): string | null {
-	const compact = input.replace(/-/g, "").trim();
-	if (!/^\d{8}$/.test(compact)) {
-		return null;
-	}
-	return compact;
-}
+
 
 function toPositiveInt(value: string | undefined, fallback: number): number {
 	if (!value) {
@@ -98,6 +96,7 @@ function jsonWithHeaders(body: unknown, init: { status: number; headers?: Record
 }
 
 function getClientIp(req: NextRequest): string {
+	if (process.env.TRUST_PROXY_HEADERS !== "true") return "local";
 	const xff = req.headers.get("x-forwarded-for");
 	if (xff) {
 		return xff.split(",")[0]?.trim() || "unknown";
@@ -106,22 +105,11 @@ function getClientIp(req: NextRequest): string {
 }
 
 function isSameOriginRequest(req: NextRequest): boolean {
-	const origin = req.headers.get("origin");
-	if (!origin) {
-		return true;
-	}
-
 	const host = req.headers.get("host");
-	if (!host) {
-		return false;
-	}
-
-	try {
-		const originHost = new URL(origin).host;
-		return originHost === host;
-	} catch {
-		return false;
-	}
+	const trustedProto = process.env.TRUST_PROXY_HEADERS === "true" ? req.headers.get("x-forwarded-proto") : null;
+	const protocol = trustedProto === "https" ? "https:" : new URL(req.url).protocol;
+	const expectedUrl = host ? `${protocol}//${host}` : req.url;
+	return isSameOrigin(req.headers.get("origin"), process.env.PUBLIC_ORIGIN || expectedUrl);
 }
 
 function sweepRateLimitStore(now: number) {
@@ -269,7 +257,7 @@ export async function POST(req: NextRequest) {
 			return jsonWithHeaders({ message: "学号或密码格式错误" }, { status: 400 });
 		}
 
-		const date = normalizeDateToYyyyMMdd(dateInput);
+		const date = normalizeCourseDate(dateInput);
 		if (!date) {
 			return jsonWithHeaders({ message: "日期格式错误，请使用 yyyyMMdd 或 yyyy-MM-dd" }, { status: 400 });
 		}
@@ -312,12 +300,17 @@ export async function POST(req: NextRequest) {
 			clearTimeout(loginTimeout);
 		}
 
-		const sessionId = loginData?.result?.sessionId;
-		const userId = loginData?.result?.id;
-
-		if (loginData?.STATUS !== "0" || !sessionId || !userId) {
-			return jsonWithHeaders({ message: "登录失败，请检查学号密码是否正确" }, { status: 401 });
+		const loginResult = analyzeSchoolLogin(loginData);
+		if (!loginResult.ok) {
+			console.info("[course-uuid/login]", JSON.stringify({
+				requestId, code: loginResult.code, upstreamErrorCode: loginResult.upstreamErrorCode,
+			}));
+			return jsonWithHeaders({
+				message: loginResult.message, code: loginResult.code,
+				upstreamErrorCode: loginResult.upstreamErrorCode, requestId,
+			}, { status: loginResult.status ?? 502 });
 		}
+		const { sessionId, userId } = loginResult;
 
 		stage = "schedule";
 		const scheduleAbortController = new AbortController();
