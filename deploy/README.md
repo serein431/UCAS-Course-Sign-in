@@ -40,9 +40,27 @@ RequestHeader set Referer "https://jmrai.net/" "expr=%{REQUEST_URI} !~ m#^/ucas(
 
 - `SESSION_KEY_FILE=/opt/ucas-sign-in/config/session.key`：32字节随机密钥，root创建，仅root与服务用户组可读；不复制到源码、Git或发布包。
 - `SESSION_STORE_DIR=/opt/ucas-sign-in/sessions`：服务用户专用0700目录，会话文件0600，AES-256-GCM加密，只包含账号、学校用户ID、学校会话及本工具有效期；不含密码。
-- systemd补充配置为`/etc/systemd/system/ucas-sign-in.service.d/session.conf`，设置以上两项Environment，并为会话目录增加ReadWritePaths。原服务的其他限制保持不变。
+- `SESSION_COOKIE_PATH=/ucas`明确指定运行时Cookie范围，不能只依赖构建变量。
+- systemd补充配置为`/etc/systemd/system/ucas-sign-in.service.d/session.conf`，设置以上三项Environment，并为会话目录增加ReadWritePaths。原服务的其他限制保持不变。
 - 密钥和会话目录独立于`current`，更新或重启继续使用；不要随发布包重建密钥。换密钥会使旧会话不可读，需要重新登录。
 - 公共服务必须显式配置以上两个路径，缺少配置时拒绝保存会话。本机默认使用git忽略的`.local/auth`。
 - HTTPSCookie名为`__Secure-ucas_session`，Path为`/ucas`，没有Domain属性，只含256位随机凭证；退出时用相同名称和路径删除，并撤销服务器记录。
 - 构建配置排除`.local`及`.env*`，运行时密钥读取明确不参加文件追踪；上传源码仍须排除这些路径。
 - 回退至不支持会话的旧版本后，需要重新输入学校账号密码。旧会话目录及密钥可以保留，不要打印其内容排错。
+
+本次范围修正会拒绝并撤销旧的根路径会话，清除旧根路径Cookie，首次更新后需要再登录一次。新会话与/ucas范围绑定；今后正常更新和重启仍保留有效会话。状态GET不覆盖当前/ucas凭证，只追加旧根路径Cookie的清除指令。
+
+### Apache的Cookie改写例外
+
+2026-10-07检查实际HTTPS响应时发现，现有站点的全局配置会把Cookie的Path改成`/`，并将SameSite=Strict改成Lax。应用测试并不能发现代理的这类改写。已在`/etc/apache2/sites-enabled/app.corvusapi.org.conf`将两项限制为`/ucas`以外的路径，其他路径保留原有行为：
+
+```apache
+<LocationMatch "^/(?!ucas(?:/|$))">
+    ProxyPassReverseCookiePath / /
+</LocationMatch>
+Header edit Set-Cookie ";[ ]*SameSite=Strict" "; SameSite=Lax" "expr=%{REQUEST_URI} !~ m#^/ucas(?:/|$)#"
+```
+
+修改通过`apache2ctl configtest`后重新加载。实际HTTPS退出响应已检查：当前Cookie为Path=/ucas、HttpOnly、Secure、SameSite=Strict，同时发送旧根路径Cookie的删除指令。
+
+由于修正前的Cookie曾被代理扩大到根路径，本次额外更换了一次会话密钥，让旧凭证失效，需要重新登录。以后正常发布不可重复更换密钥。配置备份为`/opt/ucas-sign-in/backups/app-corvus-session-cookie-*.conf`，旧密钥备份为同目录的`session-key-before-scope-fix-*.bin`，仅root可读，不上传或打印。回退Cookie配置时不要恢复旧密钥让旧凭证重新生效。

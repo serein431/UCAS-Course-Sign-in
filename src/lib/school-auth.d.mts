@@ -9,6 +9,8 @@ export class AuthenticationError extends Error {
 }
 export function isSameOriginRequest(req: NextRequest): boolean;
 export function sessionCookieName(req: NextRequest): string;
+export function sessionCookiePath(req: NextRequest): string;
+export function clearLegacyRootCookie(response: NextResponse, req: NextRequest): void;
 export function setSessionCookie(response: NextResponse, req: NextRequest, token: string, remember: boolean): void;
 export function clearSessionCookie(response: NextResponse, req: NextRequest): void;
 export function getSavedSession(req: NextRequest): Promise<SavedSession | null>;

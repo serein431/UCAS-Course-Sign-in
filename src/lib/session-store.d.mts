@@ -1,4 +1,4 @@
-export type SchoolAuth = { username: string; userId: string; sessionId: string };
+export type SchoolAuth = { username: string; userId: string; sessionId: string; cookiePath?: string };
 export type SavedSession = SchoolAuth & { version: number; issuedAt: number; expiresAt: number; remember: boolean };
 export const REMEMBER_TTL_SECONDS: number;
 export const TEMPORARY_TTL_SECONDS: number;

@@ -31,22 +31,43 @@ export function sessionCookieName(req) {
 function cookieOptions(req) {
  return {
   httpOnly: true, secure: new URL(requestUrl(req)).protocol === 'https:',
-  sameSite: 'strict', path: process.env.NEXT_PUBLIC_BASE_PATH || '/', priority: 'high',
+  sameSite: 'strict', path: sessionCookiePath(req), priority: 'high',
  };
+}
+
+export function sessionCookiePath(req) {
+ const value = process.env.SESSION_COOKIE_PATH || req.nextUrl?.basePath || process.env.NEXT_PUBLIC_BASE_PATH || '/';
+ if (!/^\/[a-zA-Z0-9/_-]*$/.test(value)) throw new Error('会话Cookie路径配置错误');
+ return value;
+}
+
+export function clearLegacyRootCookie(response, req) {
+ if (sessionCookiePath(req) === '/') return;
+ // 旧发布曾使用根路径Cookie。单独追加删除指令，不能用同名cookies.set覆盖当前路径的凭证。
+ const secure = cookieOptions(req).secure ? '; Secure' : '';
+ response.headers.append('Set-Cookie', `${sessionCookieName(req)}=; Path=/; Max-Age=0${secure}; HttpOnly; SameSite=Strict`);
 }
 
 export function setSessionCookie(response, req, token, remember) {
  response.cookies.set(sessionCookieName(req), token, {
   ...cookieOptions(req), ...(remember ? { maxAge: REMEMBER_TTL_SECONDS } : {}),
  });
+ clearLegacyRootCookie(response, req);
 }
 
 export function clearSessionCookie(response, req) {
  response.cookies.set(sessionCookieName(req), '', { ...cookieOptions(req), maxAge: 0 });
+ clearLegacyRootCookie(response, req);
 }
 
 export async function getSavedSession(req) {
- return readSession(req.cookies.get(sessionCookieName(req))?.value);
+ const token = req.cookies.get(sessionCookieName(req))?.value;
+ const saved = await readSession(token);
+ if (saved && (saved.cookiePath ?? '/') !== sessionCookiePath(req)) {
+  await revokeSession(token);
+  return null;
+ }
+ return saved;
 }
 
 export async function invalidateSession(req) {

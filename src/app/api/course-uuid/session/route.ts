@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSession } from "@/lib/session-store.mjs";
-import { AuthenticationError, clearSessionCookie, getSavedSession, invalidateSession, isSameOriginRequest, loginSchool, setSessionCookie } from "@/lib/school-auth.mjs";
+import { AuthenticationError, clearSessionCookie, clearLegacyRootCookie, getSavedSession, invalidateSession, isSameOriginRequest, loginSchool, sessionCookiePath, setSessionCookie } from "@/lib/school-auth.mjs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,9 +18,12 @@ export async function GET(req: NextRequest) {
 	if (!isSameOriginRequest(req)) return json({ message: "非法来源请求" }, 403);
 	try {
 		const session = await getSavedSession(req);
-		if (session) return json({ authenticated: true, username: session.username, expiresAt: session.expiresAt });
-		// 状态读取不改Cookie，避免另一个标签页刚登录后被旧GET响应覆盖。
-		return json({ authenticated: false });
+		const response = session
+			? json({ authenticated: true, username: session.username, expiresAt: session.expiresAt })
+			: json({ authenticated: false });
+		// 不修改当前/ucas凭证，只清除旧根路径Cookie。
+		clearLegacyRootCookie(response, req);
+		return response;
 	} catch {
 		return json({ message: "暂时无法读取登录状态，请稍后重试" }, 503);
 	}
@@ -53,7 +56,7 @@ export async function POST(req: NextRequest) {
 	try {
 		const auth = await loginSchool(String(input.username ?? "").trim(), String(input.password ?? ""));
 		const remember = input.remember !== false;
-		const saved = await createSession(auth, remember);
+		const saved = await createSession({ ...auth, cookiePath: sessionCookiePath(req) }, remember);
 		try { await invalidateSession(req); }
 		catch (error) {
 			// 撤销旧会话失败时不留下另一个可用的新会话。

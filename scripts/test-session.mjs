@@ -139,7 +139,7 @@ test('未勾选保持登录时Cookie没有Max-Age', async (t) => {
  const session = await route('session');
  const response = await session.POST(req({ username: auth.username, password: 'fictional-password', remember: false }));
  assert.equal(response.status, 200);
- assert.doesNotMatch(response.headers.get('set-cookie'), /Max-Age=/i);
+ assert.doesNotMatch(response.headers.getSetCookie()[0], /Max-Age=/i);
 });
 
 test('重新登录更换凭证并撤销旧会话，错误选项不访问学校', async (t) => {
@@ -174,6 +174,8 @@ test('服务器使用HTTPS安全前缀及/ucas路径，退出用同样路径删�
   assert.match(cookie, /^__Secure-ucas_session=/);
   assert.match(cookie, /; Secure/i);
   assert.match(cookie, /Path=\/ucas/);
+  assert.equal(response.headers.getSetCookie().length, 2);
+  assert.match(response.headers.getSetCookie()[1], /Path=\/;.*Max-Age=0/);
   const token = response.cookies.get('__Secure-ucas_session').value;
   const loggedOut = await session.DELETE(req(undefined, undefined, 'DELETE', { Origin: 'https://app.example', Cookie: `__Secure-ucas_session=${token}` }));
   assert.match(loggedOut.headers.get('set-cookie'), /Path=\/ucas/);
@@ -185,8 +187,32 @@ test('服务器使用HTTPS安全前缀及/ucas路径，退出用同样路径删�
  }
 });
 
+test('Cookie范围由运行配置指定，旧根路径会话撤销，状态GET不会覆盖当前凭证', async (t) => {
+ const oldPath = process.env.SESSION_COOKIE_PATH;
+ process.env.SESSION_COOKIE_PATH = '/ucas';
+ try {
+  const calls = forbidNetwork(t);
+  const session = await route('session');
+  const legacy = await createSession(auth);
+  const legacyResponse = await session.GET(req(undefined, legacy.token, 'GET'));
+  assert.equal((await legacyResponse.json()).authenticated, false);
+  assert.equal(await readSession(legacy.token), null);
+  const current = await createSession({ ...auth, cookiePath: '/ucas' });
+  const response = await session.GET(req(undefined, current.token, 'GET'));
+  assert.equal((await response.json()).authenticated, true);
+  const cookies = response.headers.getSetCookie();
+  assert.equal(cookies.length, 1);
+  assert.match(cookies[0], /^ucas_session=; Path=\/;.*Max-Age=0/);
+  assert.equal(cookies[0].includes(current.token), false);
+  assert.ok(await readSession(current.token));
+  assert.equal(calls.length, 0);
+ } finally {
+  if (oldPath === undefined) delete process.env.SESSION_COOKIE_PATH; else process.env.SESSION_COOKIE_PATH = oldPath;
+ }
+});
+
 test('已登录查询只发一次课表请求，不重新发送密码', async (t) => {
- const saved = await createSession(auth);
+ const saved = await createSession({ ...auth, cookiePath: process.env.NEXT_PUBLIC_BASE_PATH || '/' });
  const calls = [];
  t.mock.method(globalThis, 'fetch', async (url, options) => {
   calls.push(String(url));
@@ -202,7 +228,7 @@ test('已登录查询只发一次课表请求，不重新发送密码', async (t
 });
 
 test('已登录的模拟签到不再登录学校，只取时间再使用原会话', async (t) => {
- const saved = await createSession(auth);
+ const saved = await createSession({ ...auth, cookiePath: process.env.NEXT_PUBLIC_BASE_PATH || '/' });
  const calls = [];
  t.mock.method(globalThis, 'fetch', async (url, options) => {
   calls.push(String(url));
@@ -222,7 +248,7 @@ test('缺少登录会话时不请求学校；学校明确会话失效后撤销�
  assert.equal((await query.POST(req({ date: '20261015' }))).status, 401);
  assert.equal((await sign.POST(req({ courseSchedId: '1234567' }))).status, 401);
  assert.equal(calls.length, 0);
- const saved = await createSession(auth);
+ const saved = await createSession({ ...auth, cookiePath: process.env.NEXT_PUBLIC_BASE_PATH || '/' });
  t.mock.method(globalThis, 'fetch', async () => Response.json({ STATUS: '1', ERRMSG: '请先登录' }));
  const expired = await query.POST(req({ date: '20261015' }, saved.token));
  assert.equal(expired.status, 401);
@@ -232,7 +258,7 @@ test('缺少登录会话时不请求学校；学校明确会话失效后撤销�
 });
 
 test('学校网络异常不清除会话，退出后复制旧Cookie仍不可使用', async (t) => {
- const saved = await createSession(auth);
+ const saved = await createSession({ ...auth, cookiePath: process.env.NEXT_PUBLIC_BASE_PATH || '/' });
  forbidNetwork(t);
  t.mock.method(console, 'error', () => {});
  const query = await route('query');

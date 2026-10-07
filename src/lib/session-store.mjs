@@ -43,6 +43,7 @@ function validSession(value, now) {
   typeof value.username === 'string' && value.username.length > 0 && value.username.length <= 254 &&
   typeof value.userId === 'string' && value.userId.length > 0 && value.userId.length <= 128 &&
   typeof value.sessionId === 'string' && value.sessionId.length > 0 && value.sessionId.length <= 1024 &&
+  (value.cookiePath === undefined || (typeof value.cookiePath === 'string' && /^\/[a-zA-Z0-9/_-]*$/.test(value.cookiePath))) &&
   Number.isSafeInteger(value.issuedAt) && value.issuedAt <= now &&
   Number.isSafeInteger(value.expiresAt) && value.expiresAt > value.issuedAt &&
   value.expiresAt - value.issuedAt <= REMEMBER_TTL_SECONDS * 1000 &&
@@ -69,6 +70,7 @@ async function sweepOldFiles(directory, now) {
 export async function createSession(auth, remember = true, now = Date.now()) {
  const value = {
   version: 1, username: auth.username, userId: auth.userId, sessionId: auth.sessionId,
+  cookiePath: auth.cookiePath ?? '/',
   issuedAt: now,
   expiresAt: now + (remember ? REMEMBER_TTL_SECONDS : TEMPORARY_TTL_SECONDS) * 1000,
   remember: Boolean(remember),
