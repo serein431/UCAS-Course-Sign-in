@@ -19,7 +19,7 @@ export function analyzeSchoolLogin(data) {
  let message = '学校登录接口拒绝了登录，请先确认同一账号能否登录学校课堂教学 App';
  if (upstreamErrorCode === '106' || /用户不存在|账号不存在|帐号不存在/.test(rawMessage)) {
   code = 'UPSTREAM_LOGIN_USER_NOT_FOUND';
-  message = '学校课堂教学系统未找到该账号，请核对学号，并确认此账号能登录学校课堂教学 App';
+  message = '学校课堂教学系统未找到该账号，请核对学校邮箱或账号，并确认此账号能登录学校课堂教学 App';
  } else if (/密码.{0,8}(错误|不正确)|口令.{0,8}错误/.test(rawMessage)) {
   code = 'UPSTREAM_LOGIN_PASSWORD_REJECTED';
   message = '学校课堂教学系统提示密码错误，请确认密码与学校课堂教学 App 中使用的一致';

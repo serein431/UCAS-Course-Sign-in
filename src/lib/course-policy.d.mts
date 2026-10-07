@@ -1,0 +1,31 @@
+export type CourseRecord = {
+ key: string;
+ id: string;
+ uuid: string;
+ courseId: string;
+ courseCode: string;
+ courseName: string;
+ teacherName: string;
+ classroomName: string;
+ className: string;
+ weekDay: string;
+ classBeginTime: string;
+ classEndTime: string;
+ signStatus: string;
+ date: string;
+ dateSource: 'upstream' | 'query';
+ sameNameCount: number;
+ sameNameIndex: number;
+ ambiguousIdentity: boolean;
+ canGenerate: boolean;
+ selectionIssue: string;
+};
+export type CourseSchedule = {
+ courses: CourseRecord[];
+ total: number;
+ upstreamTotal: number;
+ duplicateCount: number;
+ sameNameGroups: number;
+};
+export function normalizeCourseSchedule(items: unknown[], queryDate: string): CourseSchedule;
+export function findCourseByKey(courses: CourseRecord[], key: string): CourseRecord | null;

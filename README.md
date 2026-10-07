@@ -5,13 +5,23 @@
 - 修改版源码：[serein431/UCAS-Course-Sign-in](https://github.com/serein431/UCAS-Course-Sign-in)。
 - 手机访问：https://app.corvusapi.org/ucas。
 - 已调整手机输入字号、按钮、课程卡片和二维码布局。显示密码按钮仅临时切换显示，不会存储密码。
-- 学校登录错误会提供原因类别、学校错误码与请求编号。不要把密码发给维护者。
+- 账号优先使用学校邮箱，不要默认填写学号。学校登录错误会提供原因类别、学校错误码与请求编号。不要把密码发给维护者。
 - `UPSTREAM_LOGIN_USER_NOT_FOUND`：学校未找到该账号。
 - `UPSTREAM_LOGIN_PASSWORD_REJECTED`：学校提示密码错误。
 - `UPSTREAM_LOGIN_ACCOUNT_RESTRICTED`：学校提示账号受限，请停止重复尝试。
 - `UPSTREAM_LOGIN_INCOMPLETE`：学校称登录成功但未提供完整会话，不能认定为密码错误。
 - `UPSTREAM_LOGIN_REJECTED`：学校拒绝登录但原因尚不能细分，请先验证同一账号能否登录官方课堂教学 App。
 - 服务不会自动尝试其他密码，也不会在登录失败后提交签到。
+
+## 同名课程与课次识别
+
+- 一门课程可能有多条上课记录，数量按记录计算，不表示有多少门不同课程。
+- 每条记录显示日期、时段和课次 ID；学校返回教室、班级或课程代码时也会显示，未返回则明确写“学校未提供”。
+- UUID 不作为唯一选择标识。选择第二、第三条记录时，二维码与直接签到均使用那一条的7位课次 ID，而不是列表第一条的 ID。
+- 只有整个原始 JSON 记录完全相同时才合并；同名、同 UUID、同课次 ID 都不足以单独判断重复。学校返回的信息无法区分时，保留记录并禁止选择，请核对官方课表。
+- 修改账号或日期会清空旧结果和二维码；学校返回的日期与查询日期不符时不能选择。
+- 日期来源优先使用学校返回的开始时间；只有时分或无开始时间时使用查询日期，不声称学校另行确认了日期。
+- 查询接口新增 `upstreamTotal`（原记录数）、`duplicateCount`（完全重复数）、`sameNameGroups`（同名组数）。记录中的 `key` 只用于本次列表识别，不能作为学校签到编号。`courseId` 与课次 ID 分开保留，不用它代替签到目标。
 
 部署方法见 [deploy/README.md](deploy/README.md)。
 
@@ -42,7 +52,7 @@ UCAS 课程查询与签到二维码生成工具。
 
 本项目用于复现 XXXX 的课程查询与签到链路，帮助用户在网页端完成以下流程：
 
-1. 输入学号、密码和日期，查询当天课程
+1. 输入学校邮箱（或课堂教学 App 的账号）、密码和日期，查询当天课程
 2. 选择课程，生成可实时刷新的签到二维码
 3. 在可签到时间内直接发起签到
 4. 手动输入课程 ID 或 UUID，生成对应签到码
@@ -157,7 +167,7 @@ Browser
 
 ```json
 {
-	"username": "2025xxxxxxxxxx",
+	"username": "student@example.edu.cn",
 	"password": "your-password",
 	"date": "20260325"
 }
@@ -165,7 +175,7 @@ Browser
 
 字段说明：
 
-- `username`：学号，必填
+- `username`：学校邮箱或课堂教学 App 的账号，必填，最长254个字符
 - `password`：密码，必填
 - `date`：查询日期，支持 `yyyyMMdd` 或 `yyyy-MM-dd`
 
@@ -174,10 +184,25 @@ Browser
 ```json
 {
 	"date": "20260325",
-	"total": 2,
+	"total": 1,
+	"upstreamTotal": 1,
+	"duplicateCount": 0,
+	"sameNameGroups": 0,
 	"courses": [
 		{
-			"id": "114xxxx",
+			"id": "1234567",
+			"key": "generated-record-key",
+			"date": "2026-03-25",
+			"dateSource": "upstream",
+			"classroomName": "示例教室",
+			"className": "",
+			"courseId": "",
+			"courseCode": "",
+			"sameNameCount": 1,
+			"sameNameIndex": 1,
+			"ambiguousIdentity": false,
+			"canGenerate": true,
+			"selectionIssue": "",
 			"uuid": "CADD27F17ACC44EDAFxxxxxxxxxxxxxx",
 			"courseName": "xxxxxxx",
 			"teacherName": "xxx",
@@ -211,7 +236,7 @@ Browser
 
 ```json
 {
-	"username": "2025xxxxxxxxxx",
+	"username": "student@example.edu.cn",
 	"password": "your-password",
 	"courseSchedId": "1234567"
 }
@@ -219,7 +244,7 @@ Browser
 
 字段说明：
 
-- `username`：学号，必填
+- `username`：学校邮箱或课堂教学 App 的账号，必填，最长254个字符
 - `password`：密码，必填
 - `courseSchedId`：课程 ID，必填，必须是 7 位数字字符串。UUID 仅用于手动生成二维码，不支持直接签到。
 
@@ -273,6 +298,7 @@ Browser
 - `UPSTREAM_LOGIN_TIMEOUT`
 - `UPSTREAM_LOGIN_NETWORK`
 - `UPSTREAM_SCHEDULE_HTTP`
+- `UPSTREAM_SCHEDULE_BAD_SHAPE`：课表格式无法识别，不能当作无课
 - `UPSTREAM_SCHEDULE_BAD_JSON`
 - `UPSTREAM_SCHEDULE_TIMEOUT`
 - `UPSTREAM_SCHEDULE_NETWORK`

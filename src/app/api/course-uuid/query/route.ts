@@ -1,3 +1,4 @@
+import { normalizeCourseSchedule } from "@/lib/course-policy.mjs";
 import { analyzeSchoolLogin } from "@/lib/login-policy.mjs";
 import { isSameOrigin, normalizeCourseDate } from "@/lib/sign-policy.mjs";
 import { NextRequest, NextResponse } from "next/server";
@@ -18,20 +19,9 @@ type LoginResponse = {
 	};
 };
 
-type CourseItem = {
-	id?: string;
-	uuid?: string;
-	courseName?: string;
-	teacherName?: string;
-	weekDay?: string;
-	classBeginTime?: string;
-	classEndTime?: string;
-	signStatus?: string;
-};
-
 type ScheduleResponse = {
-	STATUS?: string;
-	result?: CourseItem[];
+	STATUS?: string | number;
+	result?: unknown[];
 };
 
 export const runtime = "nodejs";
@@ -50,7 +40,7 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MAX = toPositiveInt(process.env.RATE_LIMIT_5M_MAX, 10);
 const RATE_LIMIT_DAILY_MAX = toPositiveInt(process.env.RATE_LIMIT_DAILY_MAX, 20);
 const RATE_LIMIT_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
-const MAX_USERNAME_LENGTH = 40;
+const MAX_USERNAME_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 80;
 
 type RateLimitState = {
@@ -74,8 +64,6 @@ class ApiError extends Error {
 		this.stage = stage;
 	}
 }
-
-
 
 function toPositiveInt(value: string | undefined, fallback: number): number {
 	if (!value) {
@@ -199,19 +187,6 @@ function buildLoginBody(username: string, password: string): string {
 	return body.toString();
 }
 
-function sanitizeCourse(item: CourseItem) {
-	return {
-		id: item.id ?? "",
-		uuid: item.uuid ?? "",
-		courseName: item.courseName ?? "",
-		teacherName: item.teacherName ?? "",
-		weekDay: item.weekDay ?? "",
-		classBeginTime: item.classBeginTime ?? "",
-		classEndTime: item.classEndTime ?? "",
-		signStatus: item.signStatus ?? ""
-	};
-}
-
 export async function POST(req: NextRequest) {
 	const startedAt = Date.now();
 	const requestId = crypto.randomUUID();
@@ -254,7 +229,7 @@ export async function POST(req: NextRequest) {
 		const dateInput = String(bodyObject.date ?? "").trim();
 
 		if (isCredentialInputInvalid(username, password)) {
-			return jsonWithHeaders({ message: "学号或密码格式错误" }, { status: 400 });
+			return jsonWithHeaders({ message: "账号或密码格式错误" }, { status: 400 });
 		}
 
 		const date = normalizeCourseDate(dateInput);
@@ -355,17 +330,18 @@ export async function POST(req: NextRequest) {
 			clearTimeout(scheduleTimeout);
 		}
 
-		if (scheduleData?.STATUS !== "0") {
+		if (String(scheduleData?.STATUS) !== "0") {
 			return jsonWithHeaders({ message: "课表查询失败，或当天无课程" }, { status: 502 });
 		}
 
-		const courses = (scheduleData.result ?? []).map(sanitizeCourse);
+		let schedule;
+		try { schedule = normalizeCourseSchedule(scheduleData.result ?? [], date); }
+		catch { throw new ApiError(502, "UPSTREAM_SCHEDULE_BAD_SHAPE", "学校课表接口返回了无法识别的记录，请稍后重试", "schedule"); }
 
 		return jsonWithHeaders(
 			{
 				date,
-				total: courses.length,
-				courses
+				...schedule
 			},
 			{ status: 200 }
 		);

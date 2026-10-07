@@ -1,23 +1,16 @@
 "use client";
 
 import Image from "next/image";
+import { findCourseByKey, type CourseRecord as CourseItem } from "@/lib/course-policy.mjs";
 import { correctedSignTimestamp, normalizeCourseSchedId } from "@/lib/sign-policy.mjs";
 import { FormEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-
-type CourseItem = {
-	id: string;
-	uuid: string;
-	courseName: string;
-	teacherName: string;
-	weekDay: string;
-	classBeginTime: string;
-	classEndTime: string;
-	signStatus: string;
-};
 
 type QueryResponse = {
 	date: string;
 	total: number;
+	upstreamTotal: number;
+	duplicateCount: number;
+	sameNameGroups: number;
 	courses: CourseItem[];
 };
 
@@ -55,7 +48,7 @@ const SIGN_BASE_URL = "https://iclass.ucas.edu.cn:8181/app/course/stu_scan_sign.
 type QrSource =
 	| {
 			mode: "query";
-			uuid: string;
+			courseKey: string;
 			courseId: string;
 	  }
 	| {
@@ -136,9 +129,9 @@ function buildManualSignInUrl(identifier: string, expiresAt: number): string | n
 	return null;
 }
 
-function getSignIdentifierForFilename(signUrl: string, selectedUuid: string): string {
+function getSignIdentifierForFilename(signUrl: string, fallbackId: string): string {
 	if (!signUrl) {
-		return selectedUuid || "unknown";
+		return fallbackId || "unknown";
 	}
 
 	try {
@@ -153,10 +146,14 @@ function getSignIdentifierForFilename(signUrl: string, selectedUuid: string): st
 			return timeTableId;
 		}
 
-		return selectedUuid || "unknown";
+		return fallbackId || "unknown";
 	} catch {
-		return selectedUuid || "unknown";
+		return fallbackId || "unknown";
 	}
+}
+
+function currentSignTimestamp(offset: number): number {
+	return correctedSignTimestamp(Math.round(Date.now() + offset));
 }
 
 function extractClockTime(value: string): string | null {
@@ -231,8 +228,10 @@ export default function Home() {
 	const [keyword, setKeyword] = useState("");
 	const [manualIdentifier, setManualIdentifier] = useState("");
 	const [courses, setCourses] = useState<CourseItem[]>([]);
-	const [selectedUuid, setSelectedUuid] = useState("");
-	const [statusText, setStatusText] = useState("输入学号、密码和日期，开始查询课程");
+	const [resultDate, setResultDate] = useState("");
+	const [duplicateCount, setDuplicateCount] = useState(0);
+	const [selectedCourseKey, setSelectedCourseKey] = useState("");
+	const [statusText, setStatusText] = useState("输入学校邮箱、密码和日期，开始查询课程");
 	const [statusKind, setStatusKind] = useState<StatusKind>("idle");
 	const [actionStatusText, setActionStatusText] = useState(ACTION_STATUS_DEFAULT_TEXT);
 	const [actionStatusKind, setActionStatusKind] = useState<StatusKind>("idle");
@@ -248,6 +247,7 @@ export default function Home() {
 	const [qrRelayActive, setQrRelayActive] = useState(false);
 	const [qrSource, setQrSource] = useState<QrSource | null>(null);
 	const qrSectionRef = useRef<HTMLDivElement | null>(null);
+	const qrGenerationRef = useRef(0);
 
 	const updateStatus = useCallback((kind: StatusKind, message: string) => {
 		setStatusKind(kind);
@@ -304,7 +304,8 @@ export default function Home() {
 	}, [getServerTimeOffset]);
 
 	const resetGeneratedSignState = () => {
-		setSelectedUuid("");
+		qrGenerationRef.current++;
+		setSelectedCourseKey("");
 		setSignUrl("");
 		setQrDataUrl("");
 		setExpireAt(0);
@@ -312,6 +313,14 @@ export default function Home() {
 		setQrSource(null);
 		setActionStatusKind("idle");
 		setActionStatusText(ACTION_STATUS_DEFAULT_TEXT);
+	};
+
+	const clearCourseResults = () => {
+		setCourses([]);
+		setResultDate("");
+		setDuplicateCount(0);
+		resetGeneratedSignState();
+		updateStatus("idle", "账号或日期已修改，请重新查询课程");
 	};
 
 	const getPayloadFromSource = useCallback((source: QrSource, deadline: number): string | null => {
@@ -330,8 +339,10 @@ export default function Home() {
 		});
 	}, []);
 
-	const regenerateAutoQr = useCallback(async (source: QrSource): Promise<boolean> => {
+	const regenerateAutoQr = useCallback(async (source: QrSource): Promise<boolean | null> => {
+		const generation = ++qrGenerationRef.current;
 		const offset = await getServerTimeOffset();
+		if (generation !== qrGenerationRef.current) return null;
 		const currentTimestamp = Date.now() + offset;
 		// 签到时间戳减去缓冲，弥补 UCAS 两台服务器间的时钟偏差
 		const signTimestamp = correctedSignTimestamp(Math.round(currentTimestamp));
@@ -345,11 +356,13 @@ export default function Home() {
 
 		try {
 			const imageUrl = await generateQrDataUrlFromPayload(payload);
+			if (generation !== qrGenerationRef.current) return null;
 			setSignUrl(payload);
 			setExpireAt(currentTimestamp + AUTO_QR_TTL_MS);
 			setQrDataUrl(imageUrl);
 			return true;
 		} catch {
+			if (generation !== qrGenerationRef.current) return null;
 			setQrDataUrl("");
 			setSignUrl("");
 			setExpireAt(0);
@@ -453,7 +466,7 @@ export default function Home() {
 		const delay = Math.max(0, expireAt - (Date.now() + (timeOffsetRef.current?.offset ?? 0)));
 		const timer = window.setTimeout(async () => {
 			const ok = await regenerateAutoQr(qrSource);
-			if (!ok) {
+			if (ok === false) {
 				if (qrSource.mode === "query") {
 					updateActionStatus("error", "签到码自动刷新失败，请重新选择课程");
 				} else {
@@ -475,7 +488,7 @@ export default function Home() {
 			return courses;
 		}
 		return courses.filter((item) => {
-			return item.courseName.toLowerCase().includes(word) || item.teacherName.toLowerCase().includes(word);
+			return [item.courseName, item.teacherName, item.classroomName, item.className, item.courseCode, item.id].some(value => value.toLowerCase().includes(word));
 		});
 	}, [courses, deferredKeyword]);
 
@@ -483,13 +496,16 @@ export default function Home() {
 	const hasQr = Boolean(qrDataUrl);
 	const queryAttempted = statusKind !== "idle";
 	const hasKeyword = keyword.trim().length > 0;
-	const emptyHelpText = hasKeyword ? "可先清空筛选词，再查看全部课程" : "检查日期是否为上课日，并确认学号与密码正确";
-	const isCourseSelected = (uuid: string): boolean => selectedUuid === uuid;
+	const emptyHelpText = hasKeyword ? "可先清空筛选词，再查看全部课程" : "检查日期是否为上课日，并确认账号与密码正确";
+	const isCourseSelected = (key: string): boolean => selectedCourseKey === key;
 
 	const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
 		setLoading(true);
-		setSelectedUuid("");
+		qrGenerationRef.current++;
+		setResultDate("");
+		setDuplicateCount(0);
+		setSelectedCourseKey("");
 		setSignUrl("");
 		setQrDataUrl("");
 		setExpireAt(0);
@@ -519,7 +535,10 @@ export default function Home() {
 			}
 
 			setCourses(data.courses ?? []);
-			updateStatus("success", `已查询到 ${data.total} 门课程（${data.date}）`);
+			setResultDate(data.date);
+			setDuplicateCount(data.duplicateCount ?? 0);
+			const duplicates = data.duplicateCount ? `，已合并 ${data.duplicateCount} 条完全重复记录` : "";
+			updateStatus("success", `已查询到 ${data.total} 条上课记录（${data.date}）${duplicates}`);
 		} catch {
 			setCourses([]);
 			updateStatus("error", "网络异常，请稍后重试");
@@ -528,12 +547,20 @@ export default function Home() {
 		}
 	};
 
-	const onPick = async (uuid: string, courseId: string) => {
-		setSelectedUuid(uuid);
-		const source: QrSource = { mode: "query", uuid, courseId };
+	const onPick = async (course: CourseItem) => {
+		if (!course.canGenerate || resultDate !== toYyyyMMdd(date)) {
+			updateActionStatus("error", course.selectionIssue || "日期已修改，请重新查询后选择课次");
+			return;
+		}
+		setSelectedCourseKey(course.key);
+		setSignUrl("");
+		setQrDataUrl("");
+		setExpireAt(0);
+		const source: QrSource = { mode: "query", courseKey: course.key, courseId: course.id };
 		setQrSource(source);
 
 		const ok = await regenerateAutoQr(source);
+		if (ok === null) return;
 		if (!ok) {
 			updateActionStatus("error", "签到码生成失败，请重新选择课程");
 			return;
@@ -562,16 +589,20 @@ export default function Home() {
 		}
 
 		setManualLoading(true);
-		setSelectedUuid("");
+		setSelectedCourseKey("");
+		setSignUrl("");
+		setQrDataUrl("");
+		setExpireAt(0);
 		setQrSource(source);
 
-		let ok = false;
+		let ok: boolean | null = false;
 		try {
 			ok = await regenerateAutoQr(source);
 		} finally {
 			setManualLoading(false);
 		}
 
+		if (ok === null) return;
 		if (!ok) {
 			updateStatus("error", "签到码生成失败，请检查课程ID或UUID后重试");
 			return;
@@ -594,7 +625,7 @@ export default function Home() {
 		}
 
 		const offset = await getServerTimeOffset();
-		const deadline = correctedSignTimestamp(Math.round(Date.now() + offset));
+		const deadline = currentSignTimestamp(offset);
 		const payload = getPayloadFromSource(qrSource, deadline);
 		if (!payload) {
 			if (featureMode === "query") {
@@ -609,7 +640,7 @@ export default function Home() {
 			const imageUrl = await generateQrDataUrlFromPayload(payload);
 			const link = document.createElement("a");
 			link.href = imageUrl;
-			const safeIdentifier = getSignIdentifierForFilename(payload, selectedUuid);
+			const safeIdentifier = getSignIdentifierForFilename(payload, selectedCourse?.id ?? "");
 			link.download = `ucas-signin-${safeIdentifier}-${deadline}.png`;
 			link.click();
 			if (featureMode === "query") {
@@ -667,6 +698,8 @@ export default function Home() {
 			}
 
 			setCourses(data.courses ?? []);
+			setResultDate(data.date);
+			setDuplicateCount(data.duplicateCount ?? 0);
 			return { ok: true, total: data.total ?? (data.courses ?? []).length };
 		} catch {
 			return { ok: false };
@@ -679,16 +712,11 @@ export default function Home() {
 			return;
 		}
 
-		const courseSchedId =
-			selectedCourse?.id ||
-			(() => {
-				try {
-					const url = new URL(signUrl);
-					return url.searchParams.get("courseSchedId") ?? url.searchParams.get("timeTableId") ?? "";
-				} catch {
-					return "";
-				}
-			})();
+		if (!selectedCourse || !selectedCourse.canGenerate || qrSource?.mode !== "query" || qrSource.courseKey !== selectedCourse.key || resultDate !== toYyyyMMdd(date)) {
+			updateActionStatus("error", "当前课次与签到码不一致，请重新选择课次");
+			return;
+		}
+		const courseSchedId = selectedCourse.id;
 
 		if (!normalizeCourseSchedId(courseSchedId)) {
 			updateActionStatus("error", "直接签到需要7位数字课程ID，请先查询并选择课程");
@@ -697,7 +725,7 @@ export default function Home() {
 
 		const safeUsername = username.trim();
 		if (!safeUsername || !password) {
-			updateActionStatus("error", "请先输入学号和密码");
+			updateActionStatus("error", "请先输入账号和密码");
 			return;
 		}
 
@@ -747,13 +775,7 @@ export default function Home() {
 		setThemeMode(resolvedTheme === "dark" ? "light" : "dark");
 	};
 
-	const selectedCourse = (() => {
-		if (!selectedUuid) {
-			return null;
-		}
-		return courses.find((item) => item.uuid === selectedUuid) ?? null;
-	})();
-
+	const selectedCourse = findCourseByKey(courses, selectedCourseKey);
 
 	const signWindow = (() => {
 		if (!selectedCourse) {
@@ -777,7 +799,7 @@ export default function Home() {
 		selectedCourse && (!signWindow || now < signWindow.openAt || now > signWindow.closeAt)
 	);
 
-	const directSignDisabled = loading || directSignLoading || !hasQr || !selectedUuid || directSignBlockedByTime;
+	const directSignDisabled = loading || directSignLoading || !hasQr || !selectedCourse?.canGenerate || resultDate !== toYyyyMMdd(date) || directSignBlockedByTime;
 
 	const directSignButtonText = directSignLoading
 		? "签到中..."
@@ -857,7 +879,7 @@ export default function Home() {
 								onClick={() => {
 									resetGeneratedSignState();
 									setFeatureMode("query");
-									updateStatus("idle", "输入学号、密码和日期，开始查询课程");
+									updateStatus("idle", "输入学校邮箱、密码和日期，开始查询课程");
 								}}
 								className={`action-btn min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold sm:text-sm ${
 									featureMode === "query" ? "action-btn--primary" : "action-btn--secondary"
@@ -892,21 +914,22 @@ export default function Home() {
 								<div className="space-y-1">
 									<h2 className="font-[var(--font-serif)] text-2xl font-semibold">查询课程</h2>
 									<p className="text-xs tracking-[0.08em] uppercase text-[color:var(--green)]">
-										账号密码仅用于向学校请求登录，不写入磁盘。请使用学校课堂教学 App 中的账号。
+										账号密码仅用于向学校请求登录，不写入磁盘。请优先填写学校邮箱，与课堂教学 App 使用的账号一致。
 									</p>
 								</div>
 
 								<div className="mt-6 space-y-4">
 									<label className="block text-sm font-semibold">
-										学号
+										学校邮箱 / 账号
 										<input
 											className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
-											name="studentId"
-											inputMode="numeric"
-											maxLength={40}
+											name="schoolAccount"
+											inputMode="email"
+											maxLength={254}
 											autoCapitalize="none"
 											value={username}
-											onChange={(e) => setUsername(e.target.value)}
+											onChange={(e) => { setUsername(e.target.value); clearCourseResults(); }}
+											disabled={loading || directSignLoading}
 											autoComplete="username"
 											spellCheck={false}
 											required
@@ -938,7 +961,8 @@ export default function Home() {
 											className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
 											name="courseDate"
 											value={date}
-											onChange={(e) => setDate(e.target.value)}
+											onChange={(e) => { setDate(e.target.value); clearCourseResults(); }}
+											disabled={loading || directSignLoading}
 											required
 										/>
 									</label>
@@ -969,15 +993,16 @@ export default function Home() {
 										<input
 											className="focus-ring input-surface min-h-11 w-full rounded-xl border border-[color:var(--line)] px-4 py-2 text-sm md:w-auto md:min-w-[230px]"
 											name="courseFilter"
-											aria-label="筛选课程"
+											aria-label="筛选上课记录"
 											value={keyword}
 											onChange={(e) => setKeyword(e.target.value)}
-											placeholder="输入课程名或教师姓名进行筛选"
+											placeholder="筛选课程、教师、教室或课次ID"
 										/>
 									) : null}
 								</div>
 
 								<div className="mt-4 space-y-4">
+									{hasCourses ? <p className="text-xs leading-6 text-[color:var(--muted)]">同名记录分别列出，请按时段、教室和课次ID选择。{duplicateCount ? `已合并 ${duplicateCount} 条完全重复记录。` : ""}</p> : null}
 									<div className="space-y-3 lg:hidden">
 										{filteredCourses.length === 0 ? (
 											<div className="clay-card rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-raised)] px-4 py-8 text-center text-sm text-[color:var(--green)]">
@@ -990,10 +1015,10 @@ export default function Home() {
 											</div>
 										) : (
 											filteredCourses.map((course) => {
-												const selected = isCourseSelected(course.uuid);
+												const selected = isCourseSelected(course.key);
 												return (
 													<article
-														key={`${course.id}-${course.uuid}`}
+														key={course.key}
 														className={`course-item clay-card rounded-xl border p-4 ${
 															selected
 																? "course-item--selected border-[color:var(--line-strong)] bg-[color:var(--paper-strong)]"
@@ -1005,6 +1030,7 @@ export default function Home() {
 																<h3 className="text-sm font-semibold leading-6 break-words">
 																	{course.courseName || "--"}
 																</h3>
+																{course.sameNameCount > 1 ? <p className="mt-1 text-xs text-[color:var(--muted)]">同名记录 {course.sameNameIndex} / {course.sameNameCount}</p> : null}
 															</div>
 															<span
 																className={`status-chip rounded-md border px-2 py-1 text-xs ${
@@ -1016,11 +1042,15 @@ export default function Home() {
 																{course.signStatus === "1" ? "已签到" : "未签到"}
 															</span>
 														</div>
-														<dl className="mt-2 grid grid-cols-[40px_1fr] gap-x-2 gap-y-1 text-xs text-[color:var(--muted)]">
+														<dl className="mt-2 grid grid-cols-[52px_1fr] gap-x-2 gap-y-1 text-xs text-[color:var(--muted)]">
 															<dt className="font-medium">教师</dt>
 															<dd className="break-words">
 																{course.teacherName || "--"}
 															</dd>
+															<dt className="font-medium">日期</dt><dd>{course.date}</dd>
+															<dt className="font-medium">教室</dt><dd className="break-words">{course.classroomName || "学校未提供"}</dd>
+															{course.className ? <><dt className="font-medium">班级</dt><dd className="break-words">{course.className}</dd></> : null}
+															<dt className="font-medium">课次ID</dt><dd className="font-mono">{course.id || "缺失"}</dd>
 															<dt className="font-medium">时段</dt>
 															<dd className="break-words">
 																{formatRange(
@@ -1029,12 +1059,15 @@ export default function Home() {
 																)}
 															</dd>
 														</dl>
+														{course.selectionIssue ? <p className="mt-2 text-xs text-[color:var(--status-error-text)]">{course.selectionIssue}</p> : null}
+														<details className="mt-2 text-xs text-[color:var(--muted)]"><summary className="cursor-pointer">课程编号详情</summary><p className="mt-1 break-all">UUID：{course.uuid || "未提供"}</p>{course.courseCode ? <p>课程代码：{course.courseCode}</p> : null}</details>
 														<button
 															type="button"
-															onClick={() => onPick(course.uuid, course.id)}
+															onClick={() => onPick(course)}
+															disabled={!course.canGenerate || resultDate !== toYyyyMMdd(date) || loading || directSignLoading}
 															className="action-btn action-btn--secondary mt-3 w-full min-h-11 rounded-lg px-3.5 py-2 text-sm font-semibold"
 														>
-															{selected ? "已选中" : "生成签到码"}
+															{!course.canGenerate ? "课次信息不明确" : selected ? "已选中" : "生成签到码"}
 														</button>
 													</article>
 												);
@@ -1071,10 +1104,10 @@ export default function Home() {
 													</tr>
 												) : (
 													filteredCourses.map((course) => {
-														const selected = isCourseSelected(course.uuid);
+														const selected = isCourseSelected(course.key);
 														return (
 															<tr
-																key={`${course.id}-${course.uuid}`}
+																key={course.key}
 																className={`course-row ${
 																	selected
 																		? "bg-[color:var(--paper-strong)]"
@@ -1082,12 +1115,18 @@ export default function Home() {
 																}`}
 															>
 																<td className="max-w-[170px] px-3 py-3 font-medium break-words">
-																	{course.courseName || "--"}
+																	<p>{course.courseName || "--"}</p>
+																	{course.sameNameCount > 1 ? <p className="mt-1 text-xs text-[color:var(--muted)]">同名记录 {course.sameNameIndex} / {course.sameNameCount}</p> : null}
+																	<p className="mt-1 font-mono text-xs">课次ID：{course.id || "缺失"}</p>
+																	<details className="mt-1 text-xs font-normal text-[color:var(--muted)]"><summary className="cursor-pointer">课程编号详情</summary><p className="break-all">UUID：{course.uuid || "未提供"}</p>{course.courseCode ? <p>课程代码：{course.courseCode}</p> : null}</details>
 																</td>
 																<td className="px-3 py-3">
-																	{course.teacherName || "--"}
+																	<p>{course.teacherName || "--"}</p>
+																	<p className="mt-1 text-xs text-[color:var(--muted)]">教室：{course.classroomName || "学校未提供"}</p>
+																	{course.className ? <p className="mt-1 text-xs">班级：{course.className}</p> : null}
 																</td>
 																<td className="max-w-[180px] px-3 py-3 break-words">
+																	<p className="mb-1 text-xs text-[color:var(--muted)]">{course.date}</p>
 																	{formatRange(
 																		course.classBeginTime,
 																		course.classEndTime
@@ -1109,10 +1148,11 @@ export default function Home() {
 																<td className="px-3 py-3">
 																	<button
 																		type="button"
-																		onClick={() => onPick(course.uuid, course.id)}
+																		onClick={() => onPick(course)}
+																		disabled={!course.canGenerate || resultDate !== toYyyyMMdd(date) || loading || directSignLoading}
 																		className="action-btn action-btn--secondary min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold"
 																	>
-																		{selected ? "已选中" : "生成签到码"}
+																		{!course.canGenerate ? "课次信息不明确" : selected ? "已选中" : "生成签到码"}
 																	</button>
 																</td>
 															</tr>
@@ -1140,6 +1180,7 @@ export default function Home() {
 													className="qr-image w-[220px] max-w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-raised)] p-2"
 												/>
 												<div className="space-y-3 text-sm numeric-tabular">
+													{selectedCourse ? <div className="rounded-lg bg-[color:var(--paper-strong)] p-3"><p className="font-semibold">当前课次：{selectedCourse.courseName}</p><p className="mt-1 text-xs leading-6">{selectedCourse.date} · {formatRange(selectedCourse.classBeginTime, selectedCourse.classEndTime)}<br />教室：{selectedCourse.classroomName || "学校未提供"} · 课次ID：{selectedCourse.id}</p></div> : null}
 													<p>
 														刷新倒计时：
 														<span className="font-semibold">{expireCountdown}s</span>

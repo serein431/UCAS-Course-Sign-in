@@ -14,6 +14,7 @@ async function loadRoute(name) {
  }).outputText;
  let source = compile(await readFile(new URL(`src/app/api/course-uuid/${name}/route.ts`, root), 'utf8'));
  source = source.replaceAll('"next/server"', JSON.stringify(import.meta.resolve('next/server.js')))
+  .replaceAll('"@/lib/course-policy.mjs"', JSON.stringify(new URL('src/lib/course-policy.mjs', root).href))
   .replaceAll('"@/lib/login-policy.mjs"', JSON.stringify(new URL('src/lib/login-policy.mjs', root).href))
   .replaceAll('"@/lib/sign-policy.mjs"', JSON.stringify(new URL('src/lib/sign-policy.mjs', root).href))
   .replaceAll('"@/lib/server-time"', JSON.stringify(encodeModule(compile(timeSource))));
@@ -75,6 +76,46 @@ test('查询只返回课程字段，不返回会话或密码', async (t) => {
  assert.equal('secret' in data.courses[0], false);
  assert.equal(JSON.stringify(data).includes('mock-session'), false);
  assert.match(calls[1], /dateStr=20261007/);
+});
+
+test('查询保留三个同名同UUID课次并支持较长学校邮箱', async (t) => {
+ const email = `${'a'.repeat(45)}@example.edu.cn`;
+ let count = 0;
+ t.mock.method(globalThis, 'fetch', async (_url, options) => {
+  count++;
+  if (count === 1) {
+   assert.equal(new URLSearchParams(options.body).get('phone'), email);
+   return Response.json(login);
+  }
+  return Response.json({
+   STATUS: 0,
+   result: ['1234567', '1234568', '1234569'].map(id => ({
+    id, uuid: 'A'.repeat(32), courseName: '操作系统', roomName: '测试教室',
+    classBeginTime: '2026-10-15 08:30:00', privateData: 'do-not-return',
+   })),
+  });
+ });
+ const { POST } = await loadRoute('query');
+ const response = await POST(request({ ...credentials, username: email, date: '2026-10-15' }));
+ assert.equal(response.status, 200);
+ const data = await response.json();
+ assert.equal(data.date, '20261015');
+ assert.equal(data.total, 3);
+ assert.equal(data.sameNameGroups, 1);
+ assert.equal(new Set(data.courses.map(course => course.key)).size, 3);
+ assert.deepEqual(data.courses.map(course => course.id), ['1234567', '1234568', '1234569']);
+ assert.equal(JSON.stringify(data).includes('do-not-return'), false);
+ assert.equal(count, 2);
+});
+
+test('课表格式异常不会伪装成无课', async (t) => {
+ let count = 0;
+ t.mock.method(globalThis, 'fetch', async () => Response.json(++count === 1 ? login : { STATUS: '0', result: {} }));
+ t.mock.method(console, 'info', () => {});
+ const { POST } = await loadRoute('query');
+ const response = await POST(request({ ...credentials, date: '20261015' }));
+ assert.equal(response.status, 502);
+ assert.equal((await response.json()).code, 'UPSTREAM_SCHEDULE_BAD_SHAPE');
 });
 
 test('直接签到先登录再取学校时间，不采用客户端过期时间', async (t) => {

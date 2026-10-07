@@ -22,7 +22,7 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MAX = toPositiveInt(process.env.RATE_LIMIT_5M_MAX, 100);
 const RATE_LIMIT_DAILY_MAX = toPositiveInt(process.env.RATE_LIMIT_DAILY_MAX, 20);
 const RATE_LIMIT_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
-const MAX_USERNAME_LENGTH = 40;
+const MAX_USERNAME_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 80;
 
 type RateLimitState = {
@@ -240,7 +240,7 @@ export async function POST(req: NextRequest) {
 		const courseSchedId = normalizeCourseSchedId(courseSchedIdRaw);
 
 		if (isCredentialInputInvalid(username, password)) {
-			return jsonWithHeaders({ message: "学号或密码格式错误" }, { status: 400 });
+			return jsonWithHeaders({ message: "账号或密码格式错误" }, { status: 400 });
 		}
 
 		if (!courseSchedId) {
